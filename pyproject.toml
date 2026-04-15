@@ -1,0 +1,30 @@
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[project]
+name = "tkzs-config-service-client"
+version = "0.1.0"
+description = "tkzs config service client,get config or env from Configuration Center"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "cryptography>=46.0.7",
+    "python-dotenv>=1.2.2",
+    "requests>=2.33.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["tkzs_config_service_client"]     # 你的包名（src 下的文件夹名）
+src = "src"                   # 源码根目录
+only-packages = true          # 只打包包本身，拒绝所有无关文件
+
+[tool.hatch.build]
+exclude = [
+  "tests/",
+  "examples/",
+  "docs/",
+  "scripts/",
+  "*.pyc",
+  "__pycache__/",
+]
