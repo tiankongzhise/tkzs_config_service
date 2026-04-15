@@ -13,14 +13,15 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests>=2.33.1",
 ]
+[tool.hatch.build]
+src = "src"  # 必须放这里！
 
 [tool.hatch.build.targets.wheel]
-packages = ["tkzs_config_service_client"]     # 你的包名（src 下的文件夹名）
-src = "src"                   # 源码根目录
-only-packages = true          # 只打包包本身，拒绝所有无关文件
+packages = ["src/tkzs_config_service_client"]
 
-[tool.hatch.build]
+
 exclude = [
+  "service/",
   "tests/",
   "examples/",
   "docs/",
@@ -28,3 +29,9 @@ exclude = [
   "*.pyc",
   "__pycache__/",
 ]
+
+[[tool.uv.index]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+publish-url = "https://test.pypi.org/legacy/"
+explicit = true
