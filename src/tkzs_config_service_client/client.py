@@ -141,7 +141,7 @@ class ConfigServiceClient:
     """
 
     def __init__(self,
-                 config_name: str = 'config.toml',
+                 config_name: str = 'mysql.env',
                  config_service_url: str | None = None,
                  public_key: str | Path | None = None,
                  password: str | None = None,
