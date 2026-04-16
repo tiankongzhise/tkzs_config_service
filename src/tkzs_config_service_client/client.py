@@ -12,14 +12,16 @@
 
 依赖环境变量：
     CONFIG_SERVICE_URL    : 配置服务的URL地址
-    CONFIG_SERVICE_PASSWORD : 用于生成认证哈希的密码
+    CONFIG_SERVICE_PASSWORD : 用于生成认证HMAC的密码
 """
 
 from pathlib import Path
 import os 
 import requests
 import hashlib
+import hmac
 import secrets
+import time
 import tomllib
 from typing import Any, Callable, Literal
 from cryptography.hazmat.primitives import serialization
@@ -122,7 +124,7 @@ class ConfigServiceClient:
     """
     配置服务客户端，用于从远程服务安全获取配置文件并应用。
 
-    客户端使用RSA公钥加密认证信息（包含盐值、密码哈希和配置名），
+    客户端使用RSA公钥加密认证信息（包含盐值、HMAC、配置名、时间戳、一次性随机数），
     请求成功后根据配置文件类型（.toml或.env）将配置加载到环境变量，
     或写入本地文件。
 
@@ -342,16 +344,19 @@ class ConfigServiceClient:
         except Exception as e:
             raise ConfigServiceRuntimeError(f'load config fail at model:{model},exception:{e}') from e
 
+    # ===================== 修改点：新认证协议 =====================
     def load_config_settings(self, model: Literal['write_local_file','set_temp_env','all'] = "set_temp_env") -> None:
         """
         向配置服务发起请求，获取配置文件并根据模型应用配置。
 
-        工作流程：
-            1. 生成随机盐值，计算 (salt + password) 的SHA256哈希
-            2. 构造明文字符串 "{salt}:{hash}:{config_name}" 并用RSA公钥加密
-            3. 向配置服务URL发送POST请求，携带加密数据
-            4. 若响应状态码为200，则根据model参数调用_load_settings应用配置
-            5. 记录成功或失败信息到日志
+        工作流程（已升级）：
+            1. 生成随机盐值（salt）和一次性随机数（nonce）
+            2. 获取当前Unix时间戳（timestamp）
+            3. 构造消息字符串 f"{salt}:{filename}:{timestamp}:{nonce}"
+            4. 使用密码作为密钥计算 HMAC-SHA256(message)
+            5. 将 salt, hmac, filename, timestamp, nonce 用冒号拼接成明文
+            6. 使用RSA公钥加密明文后发送POST请求
+            7. 若响应状态码为200，则根据model参数调用_load_settings应用配置
 
         Args:
             model: 应用模式，默认为'set_temp_env'。可选值：
@@ -362,40 +367,51 @@ class ConfigServiceClient:
         Note:
             该方法会设置self.rsp属性为成功的响应对象，供内部方法使用。
             请求时默认启用SSL证书验证（verify=True），若证书验证失败会记录错误。
+            服务端现统一返回401表示失败（密码错误、文件不存在、重放攻击等），客户端不再区分具体原因。
         """
-        salt = secrets.token_hex(8)
-        m = hashlib.sha256()
-        m.update((salt + self.password).encode('utf-8'))
-        client_hash = m.hexdigest()
-
-        plain_text = f"{salt}:{client_hash}:{self.config_name}".encode('utf-8')
+        # ----- 修改点1：生成 salt 和 nonce（各16字节hex）-----
+        salt = secrets.token_hex(16)      # 32字符hex
+        nonce = secrets.token_hex(16)     # 32字符hex
+        
+        # ----- 修改点2：获取当前Unix时间戳（秒）-----
+        timestamp = str(int(time.time()))
+        
+        # ----- 修改点3：构造消息并计算 HMAC-SHA256 -----
+        # 消息格式： salt:filename:timestamp:nonce
+        message = f"{salt}:{self.config_name}:{timestamp}:{nonce}"
+        # 使用密码作为HMAC密钥（注意：密码需为bytes）
+        hmac_digest = hmac.new(
+            self.password.encode('utf-8'),
+            message.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # ----- 修改点4：构造明文请求体（格式：salt:hmac:filename:timestamp:nonce）-----
+        plain_text = f"{salt}:{hmac_digest}:{self.config_name}:{timestamp}:{nonce}".encode('utf-8')
+        
+        # RSA加密
         encrypted = self._encrypt_with_rsa(plain_text)
 
-        # 客户端默认验证服务器证书（CA 签发）
-        # 若使用自签名证书测试，可设置 verify=False 或指定 CA 包
         try:
-            response = requests.post(self.config_service_url, data=encrypted, verify=True)  # 生产环境 verify=True
+            response = requests.post(self.config_service_url, data=encrypted, verify=True)
+            # ----- 修改点5：服务端现在统一返回200或401，不再区分404等 -----
             if response.status_code == 200:
                 self.logger.info(f"✅ Got config '{self.config_name}':")
                 self.rsp = response
                 self._load_settings(model)
                 self.logger.info(f'load_config_settings success at model:{model}')
-
             elif response.status_code == 401:
-                self.logger.info("❌ Password error")
-                raise ConfigServiceResponeseCodeError("❌ Password error")
-            elif response.status_code == 404:
-                self.logger.info(f"❌ Config file '{self.config_name}' not found")
-                raise ConfigServiceResponeseCodeError(f"❌ Config file '{self.config_name}' not found")
+                self.logger.info("❌ Authentication failed (wrong password, expired request, or file not found)")
+                raise ConfigServiceResponeseCodeError("❌ Authentication failed")
             else:
                 self.logger.info(f"⚠️  Server returned {response.status_code}")
                 raise ConfigServiceResponeseCodeError(f"⚠️  Server returned {response.status_code}")
         except requests.exceptions.SSLError:
             self.logger.info("❌ SSL certificate validation failed. Are you using a CA-signed certificate?")
-            raise requests.exceptions.SSLError
+            raise
         except Exception as e:
             self.logger.info(f"❌ Request failed: {e}")
-            raise e
+            raise
 
 
 def _verify_env_setings(verify_dict: dict) -> None:
