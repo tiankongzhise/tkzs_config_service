@@ -4,3 +4,13 @@
 go的服务端代码在service中
 src下为Python代码
 服务端请自行部署。
+
+# 安装
+可以通过tkzs-config-service-client安装本服务
+## 示例
+    uv安装uv add tkzs-config-service-client
+    pip安装pip install tkzs-config-service-client
+
+# **版本兼容性提示(重要)**
+> **请注意查看版本号，各v0.?.X客户端与服务器需要配套，v0.1.x与v0.2.X的服务器与客户端是不兼容升级。**
+> **使用0.1.X的客户端请求0.2.X的服务端必然报错。使用0.2.X的客户端去请求0.1.X的服务端也必然报错**
