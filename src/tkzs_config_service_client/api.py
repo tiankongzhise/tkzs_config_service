@@ -180,6 +180,17 @@ class APIClient:
         self.token_manager.clear_token()
         self.logger.info("Logged out")
 
+    def deactivate_user(self, username: Optional[str] = None) -> Dict[str, Any]:
+        """
+        逻辑注销当前登录用户
+        """
+        endpoint = "/api/user/deactivate"
+        if username:
+            endpoint = f"{endpoint}?username={quote(username, safe='')}"
+        data = self._request("DELETE", endpoint)
+        self.token_manager.clear_token()
+        return data
+
     # ============ 配置管理接口 ============
 
     def list_configs(self) -> List[Dict[str, Any]]:

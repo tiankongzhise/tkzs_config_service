@@ -56,14 +56,21 @@ func createTables() error {
 	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		username TEXT UNIQUE NOT NULL,
+		original_username TEXT,
 		password_hash TEXT NOT NULL,
 		public_key TEXT NOT NULL,
+		is_deleted INTEGER NOT NULL DEFAULT 0,
+		deleted_at TIMESTAMP NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);`
 
 	if _, err := db.Exec(userTableSQL); err != nil {
 		return fmt.Errorf("failed to create users table: %w", err)
 	}
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN original_username TEXT")
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE users ADD COLUMN deleted_at TIMESTAMP NULL")
+	_, _ = db.Exec("UPDATE users SET original_username = username WHERE original_username IS NULL OR original_username = ''")
 
 	// 配置表
 	configTableSQL := `
@@ -93,9 +100,12 @@ func createTables() error {
 type User struct {
 	ID           int64
 	Username     string
+	OriginalUsername string
 	PasswordHash string
 	PublicKey    string
 	CreatedAt    string
+	IsDeleted    bool
+	DeletedAt    sql.NullString
 }
 
 // CreateUser 创建用户
@@ -105,7 +115,7 @@ func CreateUser(username, passwordHash, publicKey string) (int64, error) {
 
 	// 检查用户名是否已存在
 	var exists int
-	err := db.QueryRow("SELECT COUNT(*) FROM users WHERE username = ?", username).Scan(&exists)
+	err := db.QueryRow("SELECT COUNT(*) FROM users WHERE username = ? AND is_deleted = 0", username).Scan(&exists)
 	if err != nil {
 		return 0, fmt.Errorf("failed to check username: %w", err)
 	}
@@ -115,8 +125,8 @@ func CreateUser(username, passwordHash, publicKey string) (int64, error) {
 
 	// 插入用户
 	result, err := db.Exec(
-		"INSERT INTO users (username, password_hash, public_key) VALUES (?, ?, ?)",
-		username, passwordHash, publicKey,
+		"INSERT INTO users (username, original_username, password_hash, public_key, is_deleted, deleted_at) VALUES (?, ?, ?, ?, 0, NULL)",
+		username, username, passwordHash, publicKey,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert user: %w", err)
@@ -144,9 +154,9 @@ func GetUserByUsername(username string) (*User, error) {
 
 	user := &User{}
 	err := db.QueryRow(
-		"SELECT id, username, password_hash, public_key, created_at FROM users WHERE username = ?",
+		"SELECT id, username, original_username, password_hash, public_key, created_at, is_deleted, deleted_at FROM users WHERE username = ? AND is_deleted = 0",
 		username,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.PublicKey, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &user.OriginalUsername, &user.PasswordHash, &user.PublicKey, &user.CreatedAt, &user.IsDeleted, &user.DeletedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -164,9 +174,9 @@ func GetUserByID(userID int64) (*User, error) {
 
 	user := &User{}
 	err := db.QueryRow(
-		"SELECT id, username, password_hash, public_key, created_at FROM users WHERE id = ?",
+		"SELECT id, username, original_username, password_hash, public_key, created_at, is_deleted, deleted_at FROM users WHERE id = ? AND is_deleted = 0",
 		userID,
-	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.PublicKey, &user.CreatedAt)
+	).Scan(&user.ID, &user.Username, &user.OriginalUsername, &user.PasswordHash, &user.PublicKey, &user.CreatedAt, &user.IsDeleted, &user.DeletedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -360,4 +370,29 @@ func closeDatabase() {
 	if db != nil {
 		db.Close()
 	}
+}
+
+// DeactivateUser 逻辑注销用户（不物理删除）
+func DeactivateUser(userID int64) error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	var username string
+	err := db.QueryRow("SELECT username FROM users WHERE id = ? AND is_deleted = 0", userID).Scan(&username)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("user not found or already deactivated")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to query user: %w", err)
+	}
+
+	tombstone := fmt.Sprintf("%s#deleted#%d", username, userID)
+	_, err = db.Exec(
+		"UPDATE users SET username = ?, is_deleted = 1, deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND is_deleted = 0",
+		tombstone, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to deactivate user: %w", err)
+	}
+	return nil
 }

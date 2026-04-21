@@ -95,6 +95,9 @@ client.update_config("mysql.env", "/path/to/new_mysql.env")
 # 删除配置
 client.delete_config("old_config.env")
 
+# 注销当前登录用户（逻辑删除，不物理删除）
+client.deactivate_user()
+
 # 退出登录
 client.logout()
 ```
@@ -116,6 +119,7 @@ client.logout()
 | 方法 | 路径 | 描述 |
 |------|------|------|
 | GET | `/api/configs` | 获取配置列表 |
+| DELETE | `/api/user/deactivate` | 注销当前用户（逻辑删除） |
 | POST | `/api/config/upload` | 上传配置 |
 | GET | `/api/config?name={name}` | 下载配置 |
 | PUT | `/api/config?name={name}` | 更新配置 |
@@ -132,8 +136,11 @@ client.logout()
 CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE NOT NULL,
+    original_username TEXT,      -- 初始用户名（用于逻辑删除追溯）
     password_hash TEXT NOT NULL,  -- bcrypt加密
     public_key TEXT NOT NULL,     -- RSA公钥PEM
+    is_deleted INTEGER NOT NULL DEFAULT 0,  -- 0:有效 1:已注销
+    deleted_at TIMESTAMP NULL,    -- 注销时间
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -185,6 +192,15 @@ CREATE TABLE configs (
   - `~/.ssl/{username}_private_key.pem`
   - `~/.ssl/{username}_public_key.pem`
 - 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密。
+
+## 用户注销（逻辑删除）
+
+- 接口：`DELETE /api/user/deactivate`（需 JWT）
+- 客户端调用：`client.deactivate_user()`
+- 行为说明：
+  - 用户不会被物理删除，而是标记为已注销
+  - 已注销用户的旧 token 会失效（后续请求会被拒绝）
+  - 同名可重新注册，且会分配新的 `user_id`
 
 ---
 

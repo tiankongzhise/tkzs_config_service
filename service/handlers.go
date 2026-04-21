@@ -20,6 +20,7 @@ func setupRoutes() {
 	// 需要JWT认证的接口
 	http.HandleFunc("/api/configs", JWTAuthMiddleware(handleListConfigs))
 	http.HandleFunc("/api/config/upload", JWTAuthMiddleware(handleUploadConfig))
+	http.HandleFunc("/api/user/deactivate", JWTAuthMiddleware(handleDeactivateUser))
 	http.HandleFunc("/api/config", JWTAuthMiddleware(handleConfigOperation))
 	http.HandleFunc("/api/config/", JWTAuthMiddleware(handleConfigOperation))
 
@@ -443,6 +444,42 @@ func handleDeleteConfig(w http.ResponseWriter, r *http.Request, userID int64, co
 
 	log.Printf("✅ Config deleted: %s by user %d", configName, userID)
 	sendJSONResponse(w, http.StatusOK, "Config deleted successfully", nil)
+}
+
+// handleDeactivateUser 处理用户逻辑注销
+func handleDeactivateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		sendJSONError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	claims := GetUserFromRequest(r)
+	if claims == nil {
+		sendJSONError(w, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	targetUsername := strings.TrimSpace(r.URL.Query().Get("username"))
+	if targetUsername != "" && targetUsername != claims.Username {
+		sendJSONError(w, http.StatusForbidden, "Can only deactivate current user")
+		return
+	}
+
+	if err := DeactivateUser(claims.UserID); err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "already deactivated") {
+			sendJSONError(w, http.StatusNotFound, "User not found")
+			return
+		}
+		log.Printf("Failed to deactivate user: %v", err)
+		sendJSONError(w, http.StatusInternalServerError, "Failed to deactivate user")
+		return
+	}
+
+	log.Printf("✅ User deactivated: %s (ID: %d)", claims.Username, claims.UserID)
+	sendJSONResponse(w, http.StatusOK, "User deactivated successfully", map[string]interface{}{
+		"user_id":  claims.UserID,
+		"username": claims.Username,
+	})
 }
 
 // base64编码辅助函数

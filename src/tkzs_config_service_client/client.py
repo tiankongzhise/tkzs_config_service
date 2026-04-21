@@ -283,6 +283,24 @@ class ConfigServiceClient:
         self.api_client.logout()
         self.logger.info("Logged out successfully")
 
+    def deactivate_user(self, username: Optional[str] = None) -> Dict[str, Any]:
+        """
+        注销用户（逻辑删除，不物理删除）
+        """
+        if not self.is_authenticated():
+            raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
+
+        target_username = username or (self.get_user_info() or {}).get("username")
+        if not target_username:
+            raise ConfigServiceRuntimeError("Username is required to deactivate user")
+
+        try:
+            result = self.api_client.deactivate_user(target_username)
+            self.logger.info(f"✅ User deactivated successfully: {target_username}")
+            return result
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Deactivate user failed: {e}")
+
     def is_authenticated(self) -> bool:
         """
         检查是否已登录

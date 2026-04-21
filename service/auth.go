@@ -122,6 +122,18 @@ func JWTAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		// token对应用户必须仍然处于有效状态
+		user, err := GetUserByID(claims.UserID)
+		if err != nil {
+			log.Printf("JWT user check failed: %v", err)
+			sendJSONError(w, http.StatusUnauthorized, "Invalid user session")
+			return
+		}
+		if user == nil || user.Username != claims.Username {
+			sendJSONError(w, http.StatusUnauthorized, "User deactivated or invalid")
+			return
+		}
+
 		// 将用户信息注入到请求context
 		r = r.WithContext(withUserClaims(r.Context(), claims))
 		next.ServeHTTP(w, r)

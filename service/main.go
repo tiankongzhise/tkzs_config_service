@@ -41,6 +41,7 @@ func main() {
 	log.Printf("   POST   /api/register        - Register new user")
 	log.Printf("   POST   /api/login            - Login")
 	log.Printf("   GET    /api/configs          - List configs (JWT)")
+	log.Printf("   DELETE /api/user/deactivate  - Deactivate current user (JWT)")
 	log.Printf("   POST   /api/config/upload    - Upload config (JWT)")
 	log.Printf("   GET    /api/config/{name}   - Get config (JWT)")
 	log.Printf("   PUT    /api/config/{name}   - Update config (JWT)")
