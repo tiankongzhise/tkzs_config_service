@@ -30,12 +30,14 @@
 ```bash
 cd service
 
-# 初始化Go模块（首次）
-go mod init tkzs-config-service
+# 拉取依赖（首次或依赖变更后）
 go mod tidy
 
 # 运行服务
-go run main.go
+go run .
+
+# 编译服务端
+go build -ldflags="-s -w" -o ../tkzs-config-service .
 ```
 
 服务将启动在 `http://0.0.0.0:8443`

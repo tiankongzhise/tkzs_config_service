@@ -42,13 +42,14 @@ import logging
 import os
 import tomllib
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from dotenv import load_dotenv
 
 from .api import APIClient, APIError
-from .auth import TokenManager, AuthError
+from .auth import TokenManager
 from .crypto import RSACrypto, AESCrypto, save_private_key, load_private_key, CryptoError
+from .config import DEFAULT_CLIENT_CONFIG
 
 
 class ConfigServiceInitError(Exception):
@@ -66,10 +67,9 @@ class ConfigServiceResponseCodeError(Exception):
     pass
 
 
-# 全局默认配置目录
-DEFAULT_SSL_DIR = Path.home() / ".ssl"
-DEFAULT_PRIVATE_KEY_PATH = DEFAULT_SSL_DIR / "user_private_key.pem"
-DEFAULT_PUBLIC_KEY_PATH = DEFAULT_SSL_DIR / "user_public_key.pem"
+DEFAULT_SSL_DIR = DEFAULT_CLIENT_CONFIG.default_ssl_dir
+DEFAULT_PRIVATE_KEY_PATH = DEFAULT_CLIENT_CONFIG.default_private_key_path
+DEFAULT_PUBLIC_KEY_PATH = DEFAULT_CLIENT_CONFIG.default_public_key_path
 
 
 def _flatten_toml(
@@ -150,7 +150,7 @@ class ConfigServiceClient:
         load_dotenv()
 
         # 获取服务URL
-        self.config_service_url: str = config_service_url or os.getenv('CONFIG_SERVICE_URL', 'http://localhost:8443')
+        self.config_service_url: str = DEFAULT_CLIENT_CONFIG.get_service_url(config_service_url)
 
         # 密钥路径
         self.private_key_path = private_key_path or DEFAULT_PRIVATE_KEY_PATH
@@ -163,6 +163,18 @@ class ConfigServiceClient:
 
         # 响应对象
         self.rsp: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def _normalize_username(username: str) -> str:
+        safe_name = "".join(c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in username.strip())
+        return safe_name or DEFAULT_CLIENT_CONFIG.key_file_prefix
+
+    def _get_key_paths_for_user(self, username: str) -> tuple[Path, Path]:
+        normalized = self._normalize_username(username)
+        return (
+            DEFAULT_CLIENT_CONFIG.private_key_path_for_user(normalized),
+            DEFAULT_CLIENT_CONFIG.public_key_path_for_user(normalized),
+        )
 
     def _get_default_logger(self, level: str, print_enabled: bool) -> logging.Logger:
         """获取默认日志记录器"""
@@ -202,6 +214,8 @@ class ConfigServiceClient:
         """
         if len(password) < 6:
             raise ConfigServiceInitError("Password must be at least 6 characters")
+        if not username or not username.strip():
+            raise ConfigServiceInitError("Username is required")
 
         self.logger.info(f"Starting registration for user: {username}")
 
@@ -222,9 +236,13 @@ class ConfigServiceClient:
 
         # 保存私钥到本地
         try:
-            save_private_key(private_pem, self.private_key_path)
-            self.public_key_path.write_bytes(public_pem)
-            self.logger.info(f"Keys saved to {self.private_key_path} and {self.public_key_path}")
+            private_key_path, public_key_path = self._get_key_paths_for_user(username)
+            save_private_key(private_pem, private_key_path)
+            public_key_path.parent.mkdir(parents=True, exist_ok=True)
+            public_key_path.write_bytes(public_pem)
+            self.private_key_path = private_key_path
+            self.public_key_path = public_key_path
+            self.logger.info(f"Keys saved to {private_key_path} and {public_key_path}")
         except IOError as e:
             raise ConfigServiceRuntimeError(f"Failed to save keys: {e}")
 
@@ -251,6 +269,10 @@ class ConfigServiceClient:
 
         try:
             result = self.api_client.login(username, password)
+            private_key_path, public_key_path = self._get_key_paths_for_user(username)
+            if private_key_path.exists() and public_key_path.exists():
+                self.private_key_path = private_key_path
+                self.public_key_path = public_key_path
             self.logger.info(f"✅ Login successful for user: {username}")
             return result
         except APIError as e:
@@ -461,7 +483,8 @@ class ConfigServiceClient:
         self.rsp = data
 
         # 处理解密后的数据
-        return self._load_settings(decrypted_data, config_name, save_path, load_to_env)
+        normalized_save_path = Path(save_path) if save_path else None
+        return self._load_settings(decrypted_data, config_name, normalized_save_path, load_to_env)
 
     def _load_settings(self, data: bytes, config_name: str,
                        save_path: Optional[Path],
@@ -509,7 +532,7 @@ class ConfigServiceClient:
                     os.environ[key] = value
             elif suffix == '.env':
                 from dotenv import dotenv_values
-                env_vars = dotenv_values(stream=io.BytesIO(data))
+                env_vars = dotenv_values(stream=io.StringIO(data.decode("utf-8")))
                 for key, value in env_vars.items():
                     if value:
                         os.environ[key] = value

@@ -9,6 +9,7 @@ from typing import Optional
 import time
 
 import jwt
+from .config import DEFAULT_CLIENT_CONFIG
 
 
 class AuthError(Exception):
@@ -19,7 +20,7 @@ class AuthError(Exception):
 class TokenManager:
     """JWT Token管理器"""
 
-    DEFAULT_TOKEN_DIR = Path.home() / ".config" / "tkzs_service"
+    DEFAULT_TOKEN_DIR = DEFAULT_CLIENT_CONFIG.default_token_dir
     TOKEN_FILE = "token.json"
 
     def __init__(self, token_dir: Optional[Path] = None):
@@ -57,7 +58,11 @@ class TokenManager:
 
         self.token_file.write_text(json.dumps(token_data, indent=2))
         # 设置文件权限
-        self.token_file.chmod(0o600)
+        try:
+            self.token_file.chmod(0o600)
+        except (OSError, NotImplementedError):
+            # Windows 等平台可能不支持 UNIX 风格权限位
+            pass
 
     def load_token(self) -> Optional[dict]:
         """

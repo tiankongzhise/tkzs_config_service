@@ -6,11 +6,11 @@
 import base64
 import json
 import logging
-from pathlib import Path
 from typing import Optional, List, Dict, Any
 from urllib.parse import urljoin
 
 import requests
+from .config import DEFAULT_CLIENT_CONFIG
 
 
 class APIError(Exception):
@@ -36,6 +36,7 @@ class APIClient:
         self.base_url = base_url.rstrip("/")
         self.token_manager = token_manager
         self.logger = logger or logging.getLogger(__name__)
+        self.timeout = DEFAULT_CLIENT_CONFIG.request_timeout_seconds
 
     def _get_headers(self, need_auth: bool = True) -> Dict[str, str]:
         """
@@ -108,6 +109,7 @@ class APIClient:
                 method=method,
                 url=url,
                 headers=headers,
+                timeout=self.timeout,
                 **kwargs
             )
             return self._handle_response(response)
@@ -208,6 +210,7 @@ class APIClient:
             response = requests.post(
                 url,
                 headers=headers,
+                timeout=self.timeout,
                 files={
                     "config_name": (None, config_name),
                     "encrypted_content": (None, encrypted_content),
@@ -255,6 +258,7 @@ class APIClient:
             response = requests.put(
                 url,
                 headers=headers,
+                timeout=self.timeout,
                 files={
                     "encrypted_content": (None, encrypted_content),
                     "encrypted_aes_key": (None, encrypted_aes_key),
@@ -288,7 +292,7 @@ class APIClient:
         """
         try:
             url = urljoin(self.base_url, "/health")
-            response = requests.get(url, timeout=5)
+            response = requests.get(url, timeout=self.timeout)
             return response.status_code == 200
         except requests.exceptions.RequestException:
             return False
