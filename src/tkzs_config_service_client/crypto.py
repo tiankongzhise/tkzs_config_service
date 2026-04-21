@@ -129,6 +129,23 @@ class RSACrypto:
         )
         return plaintext
 
+    @staticmethod
+    def decrypt_chunked(private_key: rsa.RSAPrivateKey, ciphertext: bytes) -> bytes:
+        """
+        使用RSA私钥按块解密数据（用于分块加密结果）
+        """
+        block_size = private_key.key_size // 8
+        if block_size <= 0 or len(ciphertext) % block_size != 0:
+            raise CryptoError("Invalid chunked RSA ciphertext length")
+
+        plaintext_chunks = []
+        for i in range(0, len(ciphertext), block_size):
+            block = ciphertext[i:i + block_size]
+            plaintext_chunks.append(
+                RSACrypto.decrypt(private_key, block)
+            )
+        return b"".join(plaintext_chunks)
+
 
 class AESCrypto:
     """AES加密工具类"""

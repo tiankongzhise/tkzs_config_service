@@ -1,0 +1,35 @@
+from tkzs_config_service_client import ConfigServiceClient
+import os
+# 初始化客户端
+client = ConfigServiceClient()
+
+# 注册（首次使用，自动生成RSA密钥）
+client.register("testuser", "testpassword123")
+
+# 登录
+client.login("testuser", "testpassword123")
+
+# 上传配置
+client.upload_config("template.env", "./case/template.env")
+
+# 查看配置列表
+configs = client.list_configs()
+for cfg in configs:
+    print(f"- {cfg['config_name']} (更新于 {cfg['updated_at']})")
+
+# 下载配置到文件
+client.get_config("template.env", save_path="./case/received_template.env")
+
+# 下载并加载到环境变量
+client.get_config("template.env", load_to_env="set_temp_env")
+
+print(f'TEMPLATE_ENV: {os.getenv('TEMPLATE_ENV')} should be 66069854')
+
+# 更新配置
+client.update_config("template.env", "./case/template.env")
+
+# # 删除配置
+client.delete_config("template.env")
+
+# 退出登录
+client.logout()

@@ -3,11 +3,10 @@
 封装与服务端的所有HTTP通信，包括注册、登录和配置管理接口。
 """
 
-import base64
 import json
 import logging
 from typing import Optional, List, Dict, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import requests
 from .config import DEFAULT_CLIENT_CONFIG
@@ -82,6 +81,13 @@ class APIClient:
             message = data.get("error") or data.get("message") or "Unknown error"
             raise APIError(response.status_code, message)
 
+        # 兼容服务端统一响应格式: {"success": bool, "message": str, "data": {...}}
+        if isinstance(data, dict) and "data" in data:
+            payload = data.get("data")
+            if isinstance(payload, dict):
+                return payload
+            return {}
+
         return data
 
     def _request(self, method: str, endpoint: str, need_auth: bool = True,
@@ -114,6 +120,7 @@ class APIClient:
             )
             return self._handle_response(response)
         except requests.exceptions.RequestException as e:
+            self.logger.error(f"Request failed,url: {url}, error: {str(e)}")
             raise APIError(0, f"Request failed: {str(e)}")
 
     # ============ 用户认证接口 ============
@@ -232,7 +239,8 @@ class APIClient:
             配置数据，包含加密内容和加密密钥
         """
         self.logger.info(f"Getting config: {config_name}")
-        return self._request("GET", f"/api/config/{config_name}")
+        safe_name = quote(config_name, safe="")
+        return self._request("GET", f"/api/config?name={safe_name}")
 
     def update_config(self, config_name: str, encrypted_content: str,
                       encrypted_aes_key: str) -> Dict[str, Any]:
@@ -250,7 +258,8 @@ class APIClient:
         self.logger.info(f"Updating config: {config_name}")
 
         # 使用multipart表单上传
-        url = urljoin(self.base_url, f"/api/config/{config_name}")
+        safe_name = quote(config_name, safe="")
+        url = urljoin(self.base_url, f"/api/config?name={safe_name}")
         headers = self._get_headers()
         headers.pop("Content-Type")
 
@@ -279,7 +288,8 @@ class APIClient:
             删除结果
         """
         self.logger.info(f"Deleting config: {config_name}")
-        return self._request("DELETE", f"/api/config/{config_name}")
+        safe_name = quote(config_name, safe="")
+        return self._request("DELETE", f"/api/config?name={safe_name}")
 
     # ============ 辅助方法 ============
 

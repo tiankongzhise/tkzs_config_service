@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // 数据库全局变量
@@ -30,7 +30,7 @@ func initDatabase() error {
 
 	// 打开或创建数据库
 	var err error
-	db, err = sql.Open("sqlite3", "./tkzs_service.db")
+	db, err = sql.Open("sqlite", "./tkzs_service.db")
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
@@ -342,7 +342,7 @@ func ListConfigs(userID int64) ([]Config, error) {
 }
 
 // 辅助函数：保存配置文件到用户目录
-func saveConfigFile(userID int64, configName, content []byte) error {
+func saveConfigFile(userID int64, configName string, content []byte) error {
 	userDir := filepath.Join("configs", fmt.Sprintf("%d", userID))
 	if err := os.MkdirAll(userDir, 0755); err != nil {
 		return fmt.Errorf("failed to create user directory: %w", err)

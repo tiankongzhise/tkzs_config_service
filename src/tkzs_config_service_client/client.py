@@ -361,8 +361,16 @@ class ConfigServiceClient:
         encrypted_content = base64.b64decode(encrypted_content_b64)
         encrypted_aes_key = base64.b64decode(encrypted_aes_key_b64)
 
-        # RSA解密AES密钥
-        aes_key = RSACrypto.decrypt(private_key, encrypted_aes_key)
+        # 兼容两种格式：
+        # 1) 单层RSA加密AES密钥（旧数据）
+        # 2) 服务端二次分块RSA加密后的AES密钥（新数据）
+        try:
+            aes_key = RSACrypto.decrypt(private_key, encrypted_aes_key)
+            if len(aes_key) != AESCrypto.KEY_SIZE:
+                raise CryptoError("Unexpected AES key length after single RSA decrypt")
+        except Exception:
+            inner_encrypted_aes_key = RSACrypto.decrypt_chunked(private_key, encrypted_aes_key)
+            aes_key = RSACrypto.decrypt(private_key, inner_encrypted_aes_key)
 
         # AES解密内容
         plaintext = AESCrypto.decrypt(encrypted_content, aes_key)
@@ -394,7 +402,7 @@ class ConfigServiceClient:
 
         file_path = Path(file_path)
         if not file_path.exists():
-            raise ConfigServiceRuntimeError(f"File not found: {file_path}")
+            raise ConfigServiceRuntimeError(f"File not found: {file_path.resolve().absolute()}")
 
         self.logger.info(f"Uploading config: {config_name} from {file_path}")
 
@@ -505,8 +513,10 @@ class ConfigServiceClient:
 
         if model == 'none':
             if save_path:
-                Path(save_path).write_bytes(data)
-                self.logger.info(f"Saved to: {save_path}")
+                target_path = Path(save_path)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_bytes(data)
+                self.logger.info(f"Saved to: {target_path}")
             return None if save_path else data
 
         # 设置环境变量
@@ -517,8 +527,10 @@ class ConfigServiceClient:
         if model in ('write_local_file', 'all'):
             if save_path is None:
                 save_path = Path(f"received_{config_name}")
-            Path(save_path).write_bytes(data)
-            self.logger.info(f"Saved to: {save_path}")
+            target_path = Path(save_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(data)
+            self.logger.info(f"Saved to: {target_path}")
 
         return None if save_path else data
 
@@ -560,7 +572,7 @@ class ConfigServiceClient:
 
         file_path = Path(file_path)
         if not file_path.exists():
-            raise ConfigServiceRuntimeError(f"File not found: {file_path}")
+            raise ConfigServiceRuntimeError(f"File not found: {file_path.resolve().absolute()}")
 
         self.logger.info(f"Updating config: {config_name}")
 

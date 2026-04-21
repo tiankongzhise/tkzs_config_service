@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -133,8 +134,8 @@ type contextKey string
 const userClaimsKey contextKey = "userClaims"
 
 // withUserClaims 将用户claims存入context
-func withUserClaims(ctx interface{}, claims *Claims) interface{} {
-	return ctx
+func withUserClaims(ctx context.Context, claims *Claims) context.Context {
+	return context.WithValue(ctx, userClaimsKey, claims)
 }
 
 // GetUserFromRequest 从请求中获取用户信息

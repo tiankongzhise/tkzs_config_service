@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -18,6 +20,7 @@ func setupRoutes() {
 	// 需要JWT认证的接口
 	http.HandleFunc("/api/configs", JWTAuthMiddleware(handleListConfigs))
 	http.HandleFunc("/api/config/upload", JWTAuthMiddleware(handleUploadConfig))
+	http.HandleFunc("/api/config", JWTAuthMiddleware(handleConfigOperation))
 	http.HandleFunc("/api/config/", JWTAuthMiddleware(handleConfigOperation))
 
 	// 健康检查
@@ -256,14 +259,13 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 获取用户公钥进行二次加密
+	// 获取用户公钥进行二次加密（分块RSA，避免长度超限）
 	user, err := GetUserByID(claims.UserID)
 	if err != nil || user == nil {
 		sendJSONError(w, http.StatusInternalServerError, "Failed to get user info")
 		return
 	}
 
-	// 解析用户公钥
 	userPubKey, err := ParsePublicKey(user.PublicKey)
 	if err != nil {
 		log.Printf("Failed to parse user public key: %v", err)
@@ -271,15 +273,13 @@ func handleUploadConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 使用用户公钥二次加密AES密钥
-	doubleEncryptedAESKey, err := EncryptWithPublicKey(userPubKey, encryptedAESKey)
+	doubleEncryptedAESKey, err := EncryptWithPublicKeyChunked(userPubKey, encryptedAESKey)
 	if err != nil {
 		log.Printf("Failed to double encrypt AES key: %v", err)
 		sendJSONError(w, http.StatusInternalServerError, "Failed to encrypt data")
 		return
 	}
 
-	// 保存配置到数据库
 	configID, err := CreateConfig(claims.UserID, configName, doubleEncryptedAESKey, encryptedContent)
 	if err != nil {
 		if strings.Contains(err.Error(), "already exists") {
@@ -306,9 +306,16 @@ func handleConfigOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 从URL提取配置名
-	path := strings.TrimPrefix(r.URL.Path, "/api/config/")
-	configName := strings.TrimSuffix(path, "/")
+	// 兼容两种方式：
+	// 1) 路径参数: /api/config/{name}
+	// 2) 查询参数: /api/config?name={name}
+	var configName string
+	if r.URL.Path == "/api/config" || r.URL.Path == "/api/config/" {
+		configName = strings.TrimSpace(r.URL.Query().Get("name"))
+	} else {
+		path := strings.TrimPrefix(r.URL.Path, "/api/config/")
+		configName = strings.TrimSuffix(path, "/")
+	}
 
 	if configName == "" {
 		sendJSONError(w, http.StatusBadRequest, "Config name is required")
@@ -386,7 +393,6 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request, userID int64, us
 		return
 	}
 
-	// 获取用户公钥进行二次加密
 	user, err := GetUserByID(userID)
 	if err != nil || user == nil {
 		sendJSONError(w, http.StatusInternalServerError, "Failed to get user info")
@@ -400,15 +406,13 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request, userID int64, us
 		return
 	}
 
-	// 使用用户公钥二次加密AES密钥
-	doubleEncryptedAESKey, err := EncryptWithPublicKey(userPubKey, encryptedAESKey)
+	doubleEncryptedAESKey, err := EncryptWithPublicKeyChunked(userPubKey, encryptedAESKey)
 	if err != nil {
 		log.Printf("Failed to double encrypt AES key: %v", err)
 		sendJSONError(w, http.StatusInternalServerError, "Failed to encrypt data")
 		return
 	}
 
-	// 更新配置
 	if err := UpdateConfig(userID, configName, doubleEncryptedAESKey, encryptedContent); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			sendJSONError(w, http.StatusNotFound, "Config not found")
@@ -455,6 +459,6 @@ func base64Decode(data string) ([]byte, error) {
 
 // getConfigFilePath 获取用户配置文件的绝对路径
 func getConfigFilePath(userID int64, configName string) string {
-	userDir := filepath.Join("configs", string(rune(userID)))
+	userDir := filepath.Join("configs", fmt.Sprintf("%d", userID))
 	return filepath.Join(userDir, configName)
 }

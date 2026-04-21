@@ -36,6 +36,31 @@ func EncryptWithPublicKey(publicKey *rsa.PublicKey, plaintext []byte) ([]byte, e
 	return ciphertext, nil
 }
 
+// EncryptWithPublicKeyChunked 使用RSA公钥分块加密数据（用于较大明文）
+func EncryptWithPublicKeyChunked(publicKey *rsa.PublicKey, plaintext []byte) ([]byte, error) {
+	keyBytes := publicKey.Size()
+	hashSize := sha256.Size
+	maxChunkSize := keyBytes - 2*hashSize - 2
+	if maxChunkSize <= 0 {
+		return nil, errors.New("invalid RSA key size for OAEP")
+	}
+
+	encrypted := make([]byte, 0, ((len(plaintext)+maxChunkSize-1)/maxChunkSize)*keyBytes)
+	for offset := 0; offset < len(plaintext); offset += maxChunkSize {
+		end := offset + maxChunkSize
+		if end > len(plaintext) {
+			end = len(plaintext)
+		}
+
+		block, err := EncryptWithPublicKey(publicKey, plaintext[offset:end])
+		if err != nil {
+			return nil, err
+		}
+		encrypted = append(encrypted, block...)
+	}
+	return encrypted, nil
+}
+
 // DecryptWithPrivateKey 使用RSA私钥解密数据
 func DecryptWithPrivateKey(privateKey *rsa.PrivateKey, ciphertext []byte) ([]byte, error) {
 	plaintext, err := rsa.DecryptOAEP(

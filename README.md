@@ -19,7 +19,7 @@
 - 密码使用bcrypt加密存储
 - JWT Token认证（24小时有效期）
 - 本地AES-256-GCM加密配置文件
-- 服务端使用用户RSA公钥二次加密
+- 服务端使用用户RSA公钥分块二次加密AES密钥
 
 ---
 
@@ -39,6 +39,8 @@ go run .
 # 编译服务端
 go build -ldflags="-s -w" -o ../tkzs-config-service .
 ```
+
+> 当前服务端使用 `modernc.org/sqlite`（纯 Go 驱动），无需 CGO 即可构建。
 
 服务将启动在 `http://0.0.0.0:8443`
 
@@ -81,8 +83,8 @@ configs = client.list_configs()
 for cfg in configs:
     print(f"- {cfg['config_name']} (更新于 {cfg['updated_at']})")
 
-# 下载配置到文件
-client.get_config("mysql.env", save_path="/tmp/mysql.env")
+# 下载配置到文件（会自动创建目录）
+client.get_config("mysql.env", save_path="./tmp/mysql.env")
 
 # 下载并加载到环境变量
 client.get_config("app.toml", load_to_env="set_temp_env")
@@ -115,9 +117,9 @@ client.logout()
 |------|------|------|
 | GET | `/api/configs` | 获取配置列表 |
 | POST | `/api/config/upload` | 上传配置 |
-| GET | `/api/config/{name}` | 下载配置 |
-| PUT | `/api/config/{name}` | 更新配置 |
-| DELETE | `/api/config/{name}` | 删除配置 |
+| GET | `/api/config?name={name}` | 下载配置 |
+| PUT | `/api/config?name={name}` | 更新配置 |
+| DELETE | `/api/config?name={name}` | 删除配置 |
 
 ---
 
@@ -149,6 +151,10 @@ CREATE TABLE configs (
 );
 ```
 
+驱动说明：
+- 使用 `modernc.org/sqlite`（纯 Go）
+- 适合跨平台构建（如 Windows 构建 Linux 目标）
+
 ---
 
 ## 加密流程
@@ -160,7 +166,7 @@ CREATE TABLE configs (
 2. 使用 AES-GCM 加密文件内容
 3. 使用客户端 RSA 公钥加密 AES 密钥
 4. 上传到服务端（encrypted_content + encrypted_aes_key）
-5. 服务端使用用户 RSA 公钥二次加密 AES 密钥
+5. 服务端使用用户 RSA 公钥分块二次加密 AES 密钥
 6. 服务端存储到 SQLite
 ```
 
@@ -168,10 +174,17 @@ CREATE TABLE configs (
 
 ```
 1. 服务端返回 (encrypted_content, double_encrypted_aes_key)
-2. 客户端使用 RSA 私钥解密 AES 密钥
-3. 使用 AES 密钥解密文件内容
-4. 返回原始配置数据
+2. 客户端使用 RSA 私钥按块解密得到 first_encrypted_aes_key
+3. 客户端再次使用 RSA 私钥解密得到 AES 密钥
+4. 使用 AES 密钥解密文件内容并返回原始数据
 ```
+
+## 客户端密钥文件说明
+
+- 注册成功后会按用户名保存密钥文件，避免不同用户互相覆盖：
+  - `~/.ssl/{username}_private_key.pem`
+  - `~/.ssl/{username}_public_key.pem`
+- 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密。
 
 ---
 
