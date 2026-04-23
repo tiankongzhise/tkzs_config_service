@@ -1,7 +1,11 @@
-from tkzs_config_service_client import ConfigServiceClient
 import os
+from tkzs_config_service_client import ConfigServiceClient
+
+# 测试环境配置，优先从环境变量获取，否则使用默认值
+SERVICE_URL: str = os.getenv("CASE_CONFIG_SERVICE_URL", "http://localhost:8443")
+
 # 初始化客户端
-client = ConfigServiceClient()
+client = ConfigServiceClient(config_service_url=SERVICE_URL)
 
 # 注册（首次使用，自动生成RSA密钥）
 client.register("testuser", "testpassword123")
@@ -23,7 +27,7 @@ client.get_config("template.env", save_path="./case/received_template.env")
 # 下载并加载到环境变量
 client.get_config("template.env", load_to_env="set_temp_env")
 
-print(f'TEMPLATE_ENV: {os.getenv('TEMPLATE_ENV')} should be 66069854')
+print(f"TEMPLATE_ENV: {os.getenv('TEMPLATE_ENV')} should be 66069854")
 
 # 更新配置
 client.update_config("template.env", "./case/template.env")

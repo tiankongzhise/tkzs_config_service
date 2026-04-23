@@ -20,7 +20,7 @@
 - JWT Token认证（24小时有效期）
 - 本地AES-256-GCM加密配置文件
 - 服务端使用用户RSA公钥分块二次加密AES密钥
-- 登录执行“三要素校验”：`username + password + public_key` 必须同时匹配
+- 登录执行"三要素校验"：`username + password + public_key` 必须同时匹配
 
 ---
 
@@ -146,7 +146,7 @@ uv run python ./case/private_key_priority_case.py
 登录时公钥处理规则：
 
 1. 若本地已存在 `~/.ssl/{username}_public_key.pem`：  
-   会校验“本地公钥”与“私钥推导公钥”是否一致；一致才继续登录。
+   会校验"本地公钥"与"私钥推导公钥"是否一致；一致才继续登录。
 2. 若本地不存在该公钥文件：  
    客户端会从私钥推导公钥并自动写入本地，再将该公钥发送给服务端。
 3. 服务端登录校验：  
@@ -179,13 +179,13 @@ client2 = ConfigServiceClient(config_service_url="http://explicit-service:8443")
 
 ## `encrypted_aes_key` 参数说明
 
-`upload_config` / `update_config` 里的 `encrypted_aes_key` 不是“私钥”也不是“要上传的公钥”，而是：
+`upload_config` / `update_config` 里的 `encrypted_aes_key` 不是"私钥"也不是"要上传的公钥"，而是：
 
 1. 客户端每次上传时临时生成一个随机 AES 会话密钥；
 2. 用 RSA 公钥加密这个 AES 会话密钥；
 3. 将这个密文（Base64）作为 `encrypted_aes_key` 上传。
 
-因此这个字段的本质是“被加密后的会话密钥密文”。  
+因此这个字段的本质是"被加密后的会话密钥密文"。  
 客户端绝不会上传私钥；注册时上传的公钥用于服务端绑定用户身份和后续二次加密流程。
 
 ---
@@ -327,9 +327,17 @@ tkzs_config_service/
 ├── src/tkzs_config_service_client/  # Python 客户端
 │   ├── __init__.py
 │   ├── client.py           # 主客户端类
-│   ├── api.py             # API 通信
-│   ├── auth.py            # Token 管理
-│   └── crypto.py          # 加密工具
+│   ├── api.py              # API 通信
+│   ├── auth.py             # Token 管理
+│   ├── crypto.py           # 加密工具
+│   └── config.py           # 配置管理（运行时配置、默认值）
+├── case/                   # 示例用例
+│   ├── simple_case.py              # 基础流程示例
+│   ├── private_key_priority_case.py # 私钥优先级示例
+│   ├── deactivate_re_register_case.py # 注销重注册示例
+│   └── template.env               # 示例配置文件
+├── docs/
+│   └── configuration-priority.md   # 配置优先级详细说明
 ├── pyproject.toml
 └── README.md
 ```
@@ -348,7 +356,15 @@ tkzs_config_service/
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `CONFIG_SERVICE_URL` | 配置服务地址 | https://config-service.hnzzzsw.com |
+| `CONFIG_SERVICE_URL` | 配置服务地址 | http://localhost:8443 |
+
+### 测试环境变量（case 和 tests 目录）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CASE_CONFIG_SERVICE_URL` | case 示例服务地址 | http://localhost:8443 |
+| `TEST_CONFIG_SERVICE_URL` | 测试服务地址 | http://unit-test |
+| `TEST_RUNTIME_CONFIG_URL` | 测试运行时配置地址 | http://runtime-config-service |
 
 ---
 
@@ -356,9 +372,10 @@ tkzs_config_service/
 
 ### v0.4.0 (2026)
 - 登录增强为账号/密码/公钥三要素校验
-- 客户端登录时支持“公钥缺失则由私钥推导并落盘”
+- 客户端登录时支持"公钥缺失则由私钥推导并落盘"
 - 完善 `private_key_path/private_key_dir` 的同层与跨层优先级
 - 补充运行时配置 `configure_client(...)` 场景
+- case 和测试支持环境变量配置服务地址（`CASE_CONFIG_SERVICE_URL` 等）
 
 ### v0.3.0 (2024)
 - 新增用户注册/登录功能

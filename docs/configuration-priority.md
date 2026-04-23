@@ -13,7 +13,7 @@
 1. `ConfigServiceClient(config_service_url=...)` 构造参数
 2. `configure_client(service_url=...)` 运行时全局配置
 3. 环境变量 `CONFIG_SERVICE_URL`
-4. 包内默认值
+4. 包内默认值 `http://localhost:8443`
 
 示例：
 
@@ -25,6 +25,18 @@ client = ConfigServiceClient()  # 使用 http://global-service:8443
 
 client2 = ConfigServiceClient(config_service_url="http://explicit-service:8443")
 # client2 使用 http://explicit-service:8443（覆盖全局配置）
+```
+
+### 环境变量说明
+
+可通过设置环境变量 `CONFIG_SERVICE_URL` 修改默认值：
+
+```bash
+# Linux/macOS
+export CONFIG_SERVICE_URL="http://your-server:8443"
+
+# Windows PowerShell
+$env:CONFIG_SERVICE_URL="http://your-server:8443"
 ```
 
 ## 2) 登录私钥路径优先级
