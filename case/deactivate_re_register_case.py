@@ -24,7 +24,7 @@ def main() -> None:
     print(f"首次登录成功, user_id={uid1}")
 
     print("== 2) 上传并下载配置 ==")
-    client.upload_config(config_name, upload_file)
+    # client.upload_config(config_name, upload_file)
     client.get_config(config_name, save_path=download_file)
     print(f"配置下载成功: {download_file}")
 

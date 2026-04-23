@@ -10,7 +10,7 @@ client.register("testuser", "testpassword123")
 client.login("testuser", "testpassword123")
 
 # 上传配置
-client.upload_config("template.env", "./case/template.env")
+client.upload_config("template1.env", "./case/template1.env")
 
 # 查看配置列表
 configs = client.list_configs()

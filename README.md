@@ -69,8 +69,17 @@ client = ConfigServiceClient(
     config_service_url="http://localhost:8443"
 )
 
-# 注册（首次使用，自动生成RSA密钥）
+# 注册（首次使用）
+# 方式1：不提供密钥，客户端自动生成RSA密钥对
 client.register("my_username", "my_password")
+
+# 方式2：使用自备RSA公私钥（必须成对提供；会校验格式和匹配关系）
+client.register(
+    "my_username",
+    "my_password",
+    user_private_key_path="D:/secure_keys/my_username_private.pem",
+    user_public_key_path="D:/secure_keys/my_username_public.pem",
+)
 
 # 登录
 client.login("my_username", "my_password")
@@ -191,7 +200,11 @@ CREATE TABLE configs (
 - 注册成功后会按用户名保存密钥文件，避免不同用户互相覆盖：
   - `~/.ssl/{username}_private_key.pem`
   - `~/.ssl/{username}_public_key.pem`
+- 若注册时未提供RSA文件，客户端会自动生成并提示私钥保存位置，请务必离线备份。
+- 若注册时提供自备RSA文件，必须同时提供公钥和私钥，客户端会校验PEM格式并校验公私钥是否匹配。
 - 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密。
+- 仅有账号密码而没有对应私钥文件时，后续上传/下载/更新配置会失败。
+- 更换设备时，必须同步配置原账号对应的私钥文件，否则无法解密历史配置。
 
 ## 用户注销（逻辑删除）
 

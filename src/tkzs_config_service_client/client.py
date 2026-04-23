@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from dotenv import load_dotenv
+from cryptography.hazmat.primitives import serialization
 
 from .api import APIClient, APIError
 from .auth import TokenManager
@@ -176,6 +177,73 @@ class ConfigServiceClient:
             DEFAULT_CLIENT_CONFIG.public_key_path_for_user(normalized),
         )
 
+    def _load_or_generate_register_keys(
+            self,
+            user_private_key_path: Optional[Union[str, Path]] = None,
+            user_public_key_path: Optional[Union[str, Path]] = None,
+    ) -> tuple[bytes, bytes, str]:
+        """
+        读取用户提供的RSA密钥对（可选）或自动生成。
+
+        返回:
+            (private_pem, public_pem, source)
+            source: "provided" or "generated"
+        """
+        if user_private_key_path is None and user_public_key_path is None:
+            try:
+                private_pem, public_pem = RSACrypto.generate_keypair()
+                return private_pem, public_pem, "generated"
+            except CryptoError as e:
+                raise ConfigServiceInitError(f"Failed to generate RSA keypair: {e}")
+
+        # 用户自备密钥时，要求公私钥成对提供，避免出现只能“部分校验”的歧义状态
+        if user_private_key_path is None or user_public_key_path is None:
+            raise ConfigServiceInitError(
+                "Custom RSA files must provide both user_private_key_path and user_public_key_path"
+            )
+
+        private_path = Path(user_private_key_path)
+        if not private_path.exists():
+            raise ConfigServiceInitError(f"Private key file not found: {private_path}")
+
+        try:
+            provided_private_pem = private_path.read_bytes()
+            private_key_obj = RSACrypto.load_private_key(provided_private_pem)
+            normalized_private_pem = private_key_obj.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            derived_public_pem = private_key_obj.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception as e:
+            raise ConfigServiceInitError(
+                f"Invalid RSA private key format in {private_path}: {e}"
+            )
+
+        public_path = Path(user_public_key_path)
+        if not public_path.exists():
+            raise ConfigServiceInitError(f"Public key file not found: {public_path}")
+        try:
+            provided_public_pem = public_path.read_bytes()
+            public_key_obj = RSACrypto.load_public_key(provided_public_pem)
+            normalized_public_pem = public_key_obj.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception as e:
+            raise ConfigServiceInitError(
+                f"Invalid RSA public key format in {public_path}: {e}"
+            )
+        if normalized_public_pem != derived_public_pem:
+            raise ConfigServiceInitError(
+                "Provided RSA public key does not match the provided private key"
+            )
+
+        return normalized_private_pem, derived_public_pem, "provided"
+
     def _get_default_logger(self, level: str, print_enabled: bool) -> logging.Logger:
         """获取默认日志记录器"""
         logger = logging.getLogger("config_service_client")
@@ -195,21 +263,33 @@ class ConfigServiceClient:
 
         return logger
 
-    def register(self, username: str, password: str) -> Dict[str, Any]:
+    def register(
+            self,
+            username: str,
+            password: str,
+            user_private_key_path: Optional[Union[str, Path]] = None,
+            user_public_key_path: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
         """
         用户注册。
 
-        自动生成RSA密钥对，调用服务端注册API，并保存私钥到本地。
+        支持两种方式：
+        1) 用户成对提供RSA私钥和公钥（会校验格式并校验两者是否匹配）
+        2) 用户不提供时，客户端自动生成RSA密钥对
+
+        注册时会将该用户密钥写入客户端默认目录，供后续上传/下载/更新时使用。
 
         Args:
             username: 用户名
             password: 密码（至少6个字符）
+            user_private_key_path: 用户自备RSA私钥文件路径（PEM，可选；若提供则公钥也必须提供）
+            user_public_key_path: 用户自备RSA公钥文件路径（PEM，可选；若提供则私钥也必须提供）
 
         Returns:
             注册结果，包含user_id
 
         Raises:
-            ConfigServiceInitError: 密钥生成失败
+            ConfigServiceInitError: 密钥生成失败或用户提供的密钥格式不正确
             ConfigServiceRuntimeError: 注册失败
         """
         if len(password) < 6:
@@ -219,11 +299,10 @@ class ConfigServiceClient:
 
         self.logger.info(f"Starting registration for user: {username}")
 
-        # 生成RSA密钥对
-        try:
-            private_pem, public_pem = RSACrypto.generate_keypair()
-        except CryptoError as e:
-            raise ConfigServiceInitError(f"Failed to generate RSA keypair: {e}")
+        private_pem, public_pem, key_source = self._load_or_generate_register_keys(
+            user_private_key_path=user_private_key_path,
+            user_public_key_path=user_public_key_path,
+        )
 
         # 转换为字符串
         public_key_str = public_pem.decode('utf-8')
@@ -245,6 +324,20 @@ class ConfigServiceClient:
             self.logger.info(f"Keys saved to {private_key_path} and {public_key_path}")
         except IOError as e:
             raise ConfigServiceRuntimeError(f"Failed to save keys: {e}")
+
+        if key_source == "generated":
+            self.logger.warning(
+                "RSA private key auto-generated and saved at: %s. "
+                "Please back up this private key securely. "
+                "When switching devices, copy and configure the same private key for this account, "
+                "otherwise upload/download/update operations will fail even with correct username/password.",
+                private_key_path
+            )
+        else:
+            self.logger.info(
+                "Using user-provided RSA private key (validated) and synchronized to: %s",
+                private_key_path
+            )
 
         self.logger.info(f"✅ Registration successful for user: {username} (ID: {result.get('user_id')})")
         return result
@@ -273,6 +366,13 @@ class ConfigServiceClient:
             if private_key_path.exists() and public_key_path.exists():
                 self.private_key_path = private_key_path
                 self.public_key_path = public_key_path
+            else:
+                self.logger.warning(
+                    "RSA key files for user '%s' were not found in local default path. "
+                    "Without the correct private key, upload/download/update operations will fail. "
+                    "If you switched devices, please copy and configure your original private key file.",
+                    username
+                )
             self.logger.info(f"✅ Login successful for user: {username}")
             return result
         except APIError as e:
@@ -337,7 +437,10 @@ class ConfigServiceClient:
         """
         # 加载公钥
         if not self.public_key_path.exists():
-            raise ConfigServiceInitError(f"Public key not found: {self.public_key_path}")
+            raise ConfigServiceInitError(
+                f"Public key not found: {self.public_key_path}. "
+                "Please make sure the matching RSA key files are configured for this account."
+            )
 
         public_key = RSACrypto.load_public_key(self.public_key_path.read_bytes())
 
@@ -371,7 +474,11 @@ class ConfigServiceClient:
         """
         # 加载私钥
         if not self.private_key_path.exists():
-            raise ConfigServiceInitError(f"Private key not found: {self.private_key_path}")
+            raise ConfigServiceInitError(
+                f"Private key not found: {self.private_key_path}. "
+                "Without the correct private key, encrypted configs cannot be decrypted. "
+                "If you switched devices, copy your original private key to this device."
+            )
 
         private_key = RSACrypto.load_private_key(load_private_key(self.private_key_path))
 
