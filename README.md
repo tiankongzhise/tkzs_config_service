@@ -7,7 +7,7 @@
 
 ---
 
-## 新版本 v0.3.0 更新
+## 新版本 v0.4.0 更新
 
 ### 主要特性
 - ✅ **用户注册/登录**：支持用户名密码注册，JWT Token认证
@@ -20,6 +20,7 @@
 - JWT Token认证（24小时有效期）
 - 本地AES-256-GCM加密配置文件
 - 服务端使用用户RSA公钥分块二次加密AES密钥
+- 登录执行“三要素校验”：`username + password + public_key` 必须同时匹配
 
 ---
 
@@ -131,7 +132,7 @@ uv run python ./case/private_key_priority_case.py
 
 ### 登录私钥路径优先级
 
-客户端登录后用于解密配置的私钥路径优先级如下：
+客户端登录前会先解析私钥，并据此确定本次登录上送服务端的公钥；私钥路径优先级如下：
 
 1. `client.login(...)` 登录参数层（最高优先级）  
    - 同层规则：`private_key_path` > `private_key_dir`
@@ -141,6 +142,15 @@ uv run python ./case/private_key_priority_case.py
 
 `private_key_dir` 仅表示私钥文件父目录，文件名会按规则自动拼接：  
 `{normalized_username}{private_key_suffix}`，默认后缀为 `_private_key.pem`。
+
+登录时公钥处理规则：
+
+1. 若本地已存在 `~/.ssl/{username}_public_key.pem`：  
+   会校验“本地公钥”与“私钥推导公钥”是否一致；一致才继续登录。
+2. 若本地不存在该公钥文件：  
+   客户端会从私钥推导公钥并自动写入本地，再将该公钥发送给服务端。
+3. 服务端登录校验：  
+   只有 `username + password + public_key` 三者都与服务端记录一致，才会签发 token。
 
 ---
 
@@ -200,6 +210,19 @@ client2 = ConfigServiceClient(config_service_url="http://explicit-service:8443")
 | GET | `/api/config?name={name}` | 下载配置 |
 | PUT | `/api/config?name={name}` | 更新配置 |
 | DELETE | `/api/config?name={name}` | 删除配置 |
+
+> 说明：配置读写接口同时兼容路径参数形式：`/api/config/{name}`（GET/PUT/DELETE）。
+
+### 认证接口请求字段（关键）
+
+- `POST /api/register`
+  - `username`（必填）
+  - `password`（必填，至少 6 位）
+  - `public_key`（必填，RSA 公钥 PEM）
+- `POST /api/login`
+  - `username`（必填）
+  - `password`（必填）
+  - `public_key`（必填，必须与该账号注册公钥一致）
 
 ---
 
@@ -269,8 +292,9 @@ CREATE TABLE configs (
   - `~/.ssl/{username}_public_key.pem`
 - 若注册时未提供RSA文件，客户端会自动生成并提示私钥保存位置，请务必离线备份。
 - 若注册时提供自备RSA文件，必须同时提供公钥和私钥，客户端会校验PEM格式并校验公私钥是否匹配。
-- 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密。
-- 仅有账号密码而没有对应私钥文件时，后续上传/下载/更新配置会失败。
+- 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密与登录校验。
+- 若仅有账号密码但私钥缺失，登录会被拒绝（无法构造/验证登录公钥）。
+- 若私钥与该用户公钥不匹配，登录会被拒绝。
 - 更换设备时，必须同步配置原账号对应的私钥文件，否则无法解密历史配置。
 
 ## 用户注销（逻辑删除）
@@ -324,11 +348,17 @@ tkzs_config_service/
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `CONFIG_SERVICE_URL` | 配置服务地址 | http://localhost:8443 |
+| `CONFIG_SERVICE_URL` | 配置服务地址 | https://config-service.hnzzzsw.com |
 
 ---
 
 ## 版本历史
+
+### v0.4.0 (2026)
+- 登录增强为账号/密码/公钥三要素校验
+- 客户端登录时支持“公钥缺失则由私钥推导并落盘”
+- 完善 `private_key_path/private_key_dir` 的同层与跨层优先级
+- 补充运行时配置 `configure_client(...)` 场景
 
 ### v0.3.0 (2024)
 - 新增用户注册/登录功能
