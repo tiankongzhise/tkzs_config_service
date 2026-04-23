@@ -146,20 +146,22 @@ class APIClient:
         self.logger.info(f"Registering user: {username}")
         return self._request("POST", "/api/register", need_auth=False, json=payload)
 
-    def login(self, username: str, password: str) -> Dict[str, Any]:
+    def login(self, username: str, password: str, public_key: str) -> Dict[str, Any]:
         """
         用户登录
 
         Args:
             username: 用户名
             password: 密码
+            public_key: RSA公钥（PEM格式字符串），用于服务端与账号绑定公钥做一致性校验
 
         Returns:
             登录结果，包含access_token
         """
         payload = {
             "username": username,
-            "password": password
+            "password": password,
+            "public_key": public_key,
         }
 
         self.logger.info(f"Logging in user: {username}")
@@ -212,7 +214,7 @@ class APIClient:
         Args:
             config_name: 配置名称
             encrypted_content: Base64编码的加密内容
-            encrypted_aes_key: Base64编码的加密AES密钥
+            encrypted_aes_key: Base64编码的“RSA加密后的AES会话密钥密文”
 
         Returns:
             上传结果
@@ -261,7 +263,7 @@ class APIClient:
         Args:
             config_name: 配置名称
             encrypted_content: Base64编码的加密内容
-            encrypted_aes_key: Base64编码的加密AES密钥
+            encrypted_aes_key: Base64编码的“RSA加密后的AES会话密钥密文”
 
         Returns:
             更新结果

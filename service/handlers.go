@@ -133,6 +133,10 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		sendJSONError(w, http.StatusBadRequest, "Password is required")
 		return
 	}
+	if strings.TrimSpace(req.PublicKey) == "" {
+		sendJSONError(w, http.StatusBadRequest, "Public key is required")
+		return
+	}
 
 	// 获取用户
 	user, err := GetUserByUsername(req.Username)
@@ -150,6 +154,25 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !CheckPassword(req.Password, user.PasswordHash) {
 		log.Printf("Password mismatch for user: %s", req.Username)
 		sendJSONError(w, http.StatusUnauthorized, "Invalid username or password")
+		return
+	}
+
+	// 验证公钥（账号、密码、公钥三要素全部匹配才允许登录）
+	loginPubKey, err := ParsePublicKey(req.PublicKey)
+	if err != nil {
+		log.Printf("Invalid login public key for user %s: %v", req.Username, err)
+		sendJSONError(w, http.StatusUnauthorized, "Invalid username, password or public key")
+		return
+	}
+	storedPubKey, err := ParsePublicKey(user.PublicKey)
+	if err != nil {
+		log.Printf("Stored public key parse failed for user %s: %v", req.Username, err)
+		sendJSONError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+	if loginPubKey.E != storedPubKey.E || loginPubKey.N.Cmp(storedPubKey.N) != 0 {
+		log.Printf("Public key mismatch for user: %s", req.Username)
+		sendJSONError(w, http.StatusUnauthorized, "Invalid username, password or public key")
 		return
 	}
 

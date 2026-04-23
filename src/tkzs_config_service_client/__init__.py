@@ -19,7 +19,7 @@ from .client import (
 from .api import APIError, APIClient
 from .auth import TokenManager, AuthError
 from .crypto import RSACrypto, AESCrypto, CryptoError
-from .config import ClientConfig, DEFAULT_CLIENT_CONFIG
+from .config import ClientConfig, DEFAULT_CLIENT_CONFIG, configure_client, reset_client_config
 
 __version__ = "0.3.0"
 
@@ -45,4 +45,6 @@ __all__ = [
     'CryptoError',
     'ClientConfig',
     'DEFAULT_CLIENT_CONFIG',
+    'configure_client',
+    'reset_client_config',
 ]

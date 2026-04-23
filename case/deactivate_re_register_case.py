@@ -1,9 +1,13 @@
+import os
 from pathlib import Path
 from tkzs_config_service_client import ConfigServiceClient, ConfigServiceRuntimeError
 
+# 测试环境配置，优先从环境变量获取，否则使用默认值
+SERVICE_URL: str = os.getenv("CASE_CONFIG_SERVICE_URL", "http://localhost:8443")
+
 
 def main() -> None:
-    client = ConfigServiceClient()
+    client = ConfigServiceClient(config_service_url=SERVICE_URL)
     username = "case_reactivate_user"
     password = "CasePassword123"
     config_name = "template.env"

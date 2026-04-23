@@ -68,11 +68,6 @@ class ConfigServiceResponseCodeError(Exception):
     pass
 
 
-DEFAULT_SSL_DIR = DEFAULT_CLIENT_CONFIG.default_ssl_dir
-DEFAULT_PRIVATE_KEY_PATH = DEFAULT_CLIENT_CONFIG.default_private_key_path
-DEFAULT_PUBLIC_KEY_PATH = DEFAULT_CLIENT_CONFIG.default_public_key_path
-
-
 def _flatten_toml(
         toml_data: dict,
         parent_key: str = "",
@@ -154,8 +149,8 @@ class ConfigServiceClient:
         self.config_service_url: str = DEFAULT_CLIENT_CONFIG.get_service_url(config_service_url)
 
         # 密钥路径
-        self.private_key_path = private_key_path or DEFAULT_PRIVATE_KEY_PATH
-        self.public_key_path = public_key_path or DEFAULT_PUBLIC_KEY_PATH
+        self.private_key_path = Path(private_key_path) if private_key_path else DEFAULT_CLIENT_CONFIG.default_private_key_path
+        self.public_key_path = Path(public_key_path) if public_key_path else DEFAULT_CLIENT_CONFIG.default_public_key_path
 
         # 初始化组件
         self.token_manager = TokenManager(token_dir)
@@ -176,6 +171,71 @@ class ConfigServiceClient:
             DEFAULT_CLIENT_CONFIG.private_key_path_for_user(normalized),
             DEFAULT_CLIENT_CONFIG.public_key_path_for_user(normalized),
         )
+
+    def _resolve_login_public_key(
+            self,
+            username: str,
+            private_key_path: Path,
+            public_key_path: Path,
+    ) -> bytes:
+        """
+        解析登录要上送服务端的公钥（用于账号/密码/公钥三要素校验）。
+
+        规则：
+        1) 私钥文件必须存在且可解析；
+        2) 若本地已有公钥，要求与私钥推导公钥一致，返回本地公钥；
+        3) 若本地无公钥，则由私钥推导生成，并落盘后返回。
+        """
+        if not private_key_path.exists():
+            raise ConfigServiceRuntimeError(
+                f"Private key not found for user '{username}': {private_key_path}. "
+                "Login is rejected because public key cannot be generated for server verification."
+            )
+
+        try:
+            private_key_obj = RSACrypto.load_private_key(load_private_key(private_key_path))
+            derived_public_pem = private_key_obj.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception as e:
+            raise ConfigServiceRuntimeError(
+                f"Invalid RSA private key format in {private_key_path}: {e}"
+            )
+
+        if public_key_path.exists():
+            try:
+                expected_public_obj = RSACrypto.load_public_key(public_key_path.read_bytes())
+                expected_public_pem = expected_public_obj.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
+            except Exception as e:
+                raise ConfigServiceRuntimeError(
+                    f"Invalid RSA public key format in {public_key_path}: {e}"
+                )
+
+            if expected_public_pem != derived_public_pem:
+                raise ConfigServiceRuntimeError(
+                    "The provided private key does not match the user's public key. "
+                    "Login is rejected for security reasons."
+                )
+            return expected_public_pem
+
+        try:
+            public_key_path.parent.mkdir(parents=True, exist_ok=True)
+            public_key_path.write_bytes(derived_public_pem)
+        except IOError as e:
+            raise ConfigServiceRuntimeError(
+                f"Failed to persist derived public key to {public_key_path}: {e}"
+            )
+
+        self.logger.info(
+            "Public key not found locally for user '%s'; derived from private key and saved to: %s",
+            username,
+            public_key_path
+        )
+        return derived_public_pem
 
     def _load_or_generate_register_keys(
             self,
@@ -342,7 +402,13 @@ class ConfigServiceClient:
         self.logger.info(f"✅ Registration successful for user: {username} (ID: {result.get('user_id')})")
         return result
 
-    def login(self, username: str, password: str) -> Dict[str, Any]:
+    def login(
+            self,
+            username: str,
+            password: str,
+            private_key_path: Optional[Union[str, Path]] = None,
+            private_key_dir: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
         """
         用户登录。
 
@@ -351,6 +417,8 @@ class ConfigServiceClient:
         Args:
             username: 用户名
             password: 密码
+            private_key_path: 登录时指定RSA私钥路径。优先级最高
+            private_key_dir: 登录时指定RSA私钥目录。若同层同时指定private_key_path，则private_key_path优先
 
         Returns:
             登录结果，包含access_token、expires_in等
@@ -361,18 +429,42 @@ class ConfigServiceClient:
         self.logger.info(f"Logging in user: {username}")
 
         try:
-            result = self.api_client.login(username, password)
-            private_key_path, public_key_path = self._get_key_paths_for_user(username)
-            if private_key_path.exists() and public_key_path.exists():
-                self.private_key_path = private_key_path
-                self.public_key_path = public_key_path
-            else:
-                self.logger.warning(
-                    "RSA key files for user '%s' were not found in local default path. "
-                    "Without the correct private key, upload/download/update operations will fail. "
-                    "If you switched devices, please copy and configure your original private key file.",
-                    username
+            normalized_username = self._normalize_username(username)
+
+            # 私钥路径优先级（跨层）：
+            # 1) login参数（同层: private_key_path > private_key_dir）
+            # 2) configure_client全局配置（同层: private_key_path > private_key_dir）
+            # 3) 默认按用户名推导路径
+            if private_key_path is not None:
+                resolved_private_key_path = Path(private_key_path)
+            elif private_key_dir is not None:
+                resolved_private_key_path = Path(private_key_dir) / (
+                        f"{normalized_username}{DEFAULT_CLIENT_CONFIG.private_key_suffix}"
                 )
+            elif DEFAULT_CLIENT_CONFIG.private_key_path_override is not None:
+                resolved_private_key_path = DEFAULT_CLIENT_CONFIG.private_key_path_override
+            elif DEFAULT_CLIENT_CONFIG.private_key_dir_override is not None:
+                resolved_private_key_path = DEFAULT_CLIENT_CONFIG.private_key_dir_override / (
+                        f"{normalized_username}{DEFAULT_CLIENT_CONFIG.private_key_suffix}"
+                )
+            else:
+                resolved_private_key_path, _ = self._get_key_paths_for_user(username)
+
+            _, public_key_path = self._get_key_paths_for_user(username)
+            login_public_key_pem = self._resolve_login_public_key(
+                username,
+                resolved_private_key_path,
+                public_key_path,
+            )
+
+            result = self.api_client.login(
+                username,
+                password,
+                login_public_key_pem.decode("utf-8"),
+            )
+            self.private_key_path = resolved_private_key_path
+            self.public_key_path = public_key_path
+
             self.logger.info(f"✅ Login successful for user: {username}")
             return result
         except APIError as e:
@@ -435,14 +527,17 @@ class ConfigServiceClient:
         Returns:
             (加密内容base64, 加密的AES密钥base64)
         """
-        # 加载公钥
-        if not self.public_key_path.exists():
+        # 优先使用公钥文件；若缺失则从私钥动态推导公钥，避免必须额外提供公钥路径
+        if self.public_key_path.exists():
+            public_key = RSACrypto.load_public_key(self.public_key_path.read_bytes())
+        elif self.private_key_path.exists():
+            private_key = RSACrypto.load_private_key(load_private_key(self.private_key_path))
+            public_key = private_key.public_key()
+        else:
             raise ConfigServiceInitError(
-                f"Public key not found: {self.public_key_path}. "
-                "Please make sure the matching RSA key files are configured for this account."
+                f"Public key not found: {self.public_key_path} and private key not found: {self.private_key_path}. "
+                "Please make sure the RSA key files are configured for this account."
             )
-
-        public_key = RSACrypto.load_public_key(self.public_key_path.read_bytes())
 
         # 生成AES密钥
         aes_key = AESCrypto.generate_key()

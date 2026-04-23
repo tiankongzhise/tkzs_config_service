@@ -7,7 +7,7 @@
 
 ---
 
-## 新版本 v0.3.0 更新
+## 新版本 v0.4.0 更新
 
 ### 主要特性
 - ✅ **用户注册/登录**：支持用户名密码注册，JWT Token认证
@@ -20,6 +20,7 @@
 - JWT Token认证（24小时有效期）
 - 本地AES-256-GCM加密配置文件
 - 服务端使用用户RSA公钥分块二次加密AES密钥
+- 登录执行"三要素校验"：`username + password + public_key` 必须同时匹配
 
 ---
 
@@ -62,7 +63,13 @@ pip install tkzs-config-service-client
 ### 3. 客户端使用
 
 ```python
-from tkzs_config_service import ConfigServiceClient
+from tkzs_config_service_client import ConfigServiceClient, configure_client
+
+# 可选：运行时修改全局默认配置（适用于 uv add / pip install 后）
+configure_client(
+    service_url="http://localhost:8443",
+    private_key_path="D:/secure_keys/my_private.pem",  # 全局默认私钥路径
+)
 
 # 初始化客户端
 client = ConfigServiceClient(
@@ -81,8 +88,8 @@ client.register(
     user_public_key_path="D:/secure_keys/my_username_public.pem",
 )
 
-# 登录
-client.login("my_username", "my_password")
+# 登录（支持本次登录显式指定私钥路径，优先级最高）
+client.login("my_username", "my_password", private_key_path="D:/secure_keys/my_private.pem")
 
 # 上传配置
 client.upload_config("mysql.env", "/path/to/mysql.env")
@@ -111,6 +118,76 @@ client.deactivate_user()
 client.logout()
 ```
 
+### case 示例
+
+- 基础流程示例：`case/simple_case.py`
+- 注销重注册示例：`case/deactivate_re_register_case.py`
+- 私钥优先级示例：`case/private_key_priority_case.py`
+
+运行示例：
+
+```bash
+uv run python ./case/private_key_priority_case.py
+```
+
+### 登录私钥路径优先级
+
+客户端登录前会先解析私钥，并据此确定本次登录上送服务端的公钥；私钥路径优先级如下：
+
+1. `client.login(...)` 登录参数层（最高优先级）  
+   - 同层规则：`private_key_path` > `private_key_dir`
+2. `configure_client(...)` 全局配置层  
+   - 同层规则：`private_key_path` > `private_key_dir`
+3. 默认逻辑：`~/.ssl/{username}_private_key.pem`
+
+`private_key_dir` 仅表示私钥文件父目录，文件名会按规则自动拼接：  
+`{normalized_username}{private_key_suffix}`，默认后缀为 `_private_key.pem`。
+
+登录时公钥处理规则：
+
+1. 若本地已存在 `~/.ssl/{username}_public_key.pem`：  
+   会校验"本地公钥"与"私钥推导公钥"是否一致；一致才继续登录。
+2. 若本地不存在该公钥文件：  
+   客户端会从私钥推导公钥并自动写入本地，再将该公钥发送给服务端。
+3. 服务端登录校验：  
+   只有 `username + password + public_key` 三者都与服务端记录一致，才会签发 token。
+
+---
+
+### 服务地址（URL）优先级
+
+客户端最终使用的 `config_service_url` 优先级如下：
+
+1. `ConfigServiceClient(config_service_url=...)` 构造参数（最高优先级）
+2. `configure_client(service_url=...)` 运行时全局配置
+3. 环境变量 `CONFIG_SERVICE_URL`
+4. 包内默认值
+
+示例：
+
+```python
+from tkzs_config_service_client import ConfigServiceClient, configure_client
+
+configure_client(service_url="http://global-service:8443")
+client = ConfigServiceClient()  # 使用 http://global-service:8443
+
+client2 = ConfigServiceClient(config_service_url="http://explicit-service:8443")
+# client2 使用 http://explicit-service:8443（覆盖全局配置）
+```
+
+---
+
+## `encrypted_aes_key` 参数说明
+
+`upload_config` / `update_config` 里的 `encrypted_aes_key` 不是"私钥"也不是"要上传的公钥"，而是：
+
+1. 客户端每次上传时临时生成一个随机 AES 会话密钥；
+2. 用 RSA 公钥加密这个 AES 会话密钥；
+3. 将这个密文（Base64）作为 `encrypted_aes_key` 上传。
+
+因此这个字段的本质是"被加密后的会话密钥密文"。  
+客户端绝不会上传私钥；注册时上传的公钥用于服务端绑定用户身份和后续二次加密流程。
+
 ---
 
 ## API 端点
@@ -133,6 +210,19 @@ client.logout()
 | GET | `/api/config?name={name}` | 下载配置 |
 | PUT | `/api/config?name={name}` | 更新配置 |
 | DELETE | `/api/config?name={name}` | 删除配置 |
+
+> 说明：配置读写接口同时兼容路径参数形式：`/api/config/{name}`（GET/PUT/DELETE）。
+
+### 认证接口请求字段（关键）
+
+- `POST /api/register`
+  - `username`（必填）
+  - `password`（必填，至少 6 位）
+  - `public_key`（必填，RSA 公钥 PEM）
+- `POST /api/login`
+  - `username`（必填）
+  - `password`（必填）
+  - `public_key`（必填，必须与该账号注册公钥一致）
 
 ---
 
@@ -202,8 +292,9 @@ CREATE TABLE configs (
   - `~/.ssl/{username}_public_key.pem`
 - 若注册时未提供RSA文件，客户端会自动生成并提示私钥保存位置，请务必离线备份。
 - 若注册时提供自备RSA文件，必须同时提供公钥和私钥，客户端会校验PEM格式并校验公私钥是否匹配。
-- 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密。
-- 仅有账号密码而没有对应私钥文件时，后续上传/下载/更新配置会失败。
+- 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密与登录校验。
+- 若仅有账号密码但私钥缺失，登录会被拒绝（无法构造/验证登录公钥）。
+- 若私钥与该用户公钥不匹配，登录会被拒绝。
 - 更换设备时，必须同步配置原账号对应的私钥文件，否则无法解密历史配置。
 
 ## 用户注销（逻辑删除）
@@ -236,9 +327,17 @@ tkzs_config_service/
 ├── src/tkzs_config_service_client/  # Python 客户端
 │   ├── __init__.py
 │   ├── client.py           # 主客户端类
-│   ├── api.py             # API 通信
-│   ├── auth.py            # Token 管理
-│   └── crypto.py          # 加密工具
+│   ├── api.py              # API 通信
+│   ├── auth.py             # Token 管理
+│   ├── crypto.py           # 加密工具
+│   └── config.py           # 配置管理（运行时配置、默认值）
+├── case/                   # 示例用例
+│   ├── simple_case.py              # 基础流程示例
+│   ├── private_key_priority_case.py # 私钥优先级示例
+│   ├── deactivate_re_register_case.py # 注销重注册示例
+│   └── template.env               # 示例配置文件
+├── docs/
+│   └── configuration-priority.md   # 配置优先级详细说明
 ├── pyproject.toml
 └── README.md
 ```
@@ -259,9 +358,24 @@ tkzs_config_service/
 |------|------|--------|
 | `CONFIG_SERVICE_URL` | 配置服务地址 | http://localhost:8443 |
 
+### 测试环境变量（case 和 tests 目录）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CASE_CONFIG_SERVICE_URL` | case 示例服务地址 | http://localhost:8443 |
+| `TEST_CONFIG_SERVICE_URL` | 测试服务地址 | http://unit-test |
+| `TEST_RUNTIME_CONFIG_URL` | 测试运行时配置地址 | http://runtime-config-service |
+
 ---
 
 ## 版本历史
+
+### v0.4.0 (2026)
+- 登录增强为账号/密码/公钥三要素校验
+- 客户端登录时支持"公钥缺失则由私钥推导并落盘"
+- 完善 `private_key_path/private_key_dir` 的同层与跨层优先级
+- 补充运行时配置 `configure_client(...)` 场景
+- case 和测试支持环境变量配置服务地址（`CASE_CONFIG_SERVICE_URL` 等）
 
 ### v0.3.0 (2024)
 - 新增用户注册/登录功能
@@ -282,3 +396,7 @@ tkzs_config_service/
 ## License
 
 [LGPL-2.1](LICENSE)
+
+---
+
+更多配置优先级与加密参数说明见：`docs/configuration-priority.md`
