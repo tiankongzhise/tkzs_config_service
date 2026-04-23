@@ -212,7 +212,7 @@ class APIClient:
         Args:
             config_name: 配置名称
             encrypted_content: Base64编码的加密内容
-            encrypted_aes_key: Base64编码的加密AES密钥
+            encrypted_aes_key: Base64编码的“RSA加密后的AES会话密钥密文”
 
         Returns:
             上传结果
@@ -261,7 +261,7 @@ class APIClient:
         Args:
             config_name: 配置名称
             encrypted_content: Base64编码的加密内容
-            encrypted_aes_key: Base64编码的加密AES密钥
+            encrypted_aes_key: Base64编码的“RSA加密后的AES会话密钥密文”
 
         Returns:
             更新结果

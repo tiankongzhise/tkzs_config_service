@@ -19,8 +19,6 @@ class AuthError(Exception):
 
 class TokenManager:
     """JWT Token管理器"""
-
-    DEFAULT_TOKEN_DIR = DEFAULT_CLIENT_CONFIG.default_token_dir
     TOKEN_FILE = "token.json"
 
     def __init__(self, token_dir: Optional[Path] = None):
@@ -30,7 +28,7 @@ class TokenManager:
         Args:
             token_dir: Token存储目录，默认为 ~/.config/tkzs_service
         """
-        self.token_dir = token_dir or self.DEFAULT_TOKEN_DIR
+        self.token_dir = token_dir or DEFAULT_CLIENT_CONFIG.default_token_dir
         self.token_file = self.token_dir / self.TOKEN_FILE
 
     def save_token(self, access_token: str, expires_in: int, user_id: int, username: str) -> None:

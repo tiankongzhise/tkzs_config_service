@@ -62,7 +62,13 @@ pip install tkzs-config-service-client
 ### 3. 客户端使用
 
 ```python
-from tkzs_config_service import ConfigServiceClient
+from tkzs_config_service_client import ConfigServiceClient, configure_client
+
+# 可选：运行时修改全局默认配置（适用于 uv add / pip install 后）
+configure_client(
+    service_url="http://localhost:8443",
+    private_key_path="D:/secure_keys/my_private.pem",  # 全局默认私钥路径
+)
 
 # 初始化客户端
 client = ConfigServiceClient(
@@ -81,8 +87,8 @@ client.register(
     user_public_key_path="D:/secure_keys/my_username_public.pem",
 )
 
-# 登录
-client.login("my_username", "my_password")
+# 登录（支持本次登录显式指定私钥路径，优先级最高）
+client.login("my_username", "my_password", private_key_path="D:/secure_keys/my_private.pem")
 
 # 上传配置
 client.upload_config("mysql.env", "/path/to/mysql.env")
@@ -110,6 +116,67 @@ client.deactivate_user()
 # 退出登录
 client.logout()
 ```
+
+### case 示例
+
+- 基础流程示例：`case/simple_case.py`
+- 注销重注册示例：`case/deactivate_re_register_case.py`
+- 私钥优先级示例：`case/private_key_priority_case.py`
+
+运行示例：
+
+```bash
+uv run python ./case/private_key_priority_case.py
+```
+
+### 登录私钥路径优先级
+
+客户端登录后用于解密配置的私钥路径优先级如下：
+
+1. `client.login(...)` 登录参数层（最高优先级）  
+   - 同层规则：`private_key_path` > `private_key_dir`
+2. `configure_client(...)` 全局配置层  
+   - 同层规则：`private_key_path` > `private_key_dir`
+3. 默认逻辑：`~/.ssl/{username}_private_key.pem`
+
+`private_key_dir` 仅表示私钥文件父目录，文件名会按规则自动拼接：  
+`{normalized_username}{private_key_suffix}`，默认后缀为 `_private_key.pem`。
+
+---
+
+### 服务地址（URL）优先级
+
+客户端最终使用的 `config_service_url` 优先级如下：
+
+1. `ConfigServiceClient(config_service_url=...)` 构造参数（最高优先级）
+2. `configure_client(service_url=...)` 运行时全局配置
+3. 环境变量 `CONFIG_SERVICE_URL`
+4. 包内默认值
+
+示例：
+
+```python
+from tkzs_config_service_client import ConfigServiceClient, configure_client
+
+configure_client(service_url="http://global-service:8443")
+client = ConfigServiceClient()  # 使用 http://global-service:8443
+
+client2 = ConfigServiceClient(config_service_url="http://explicit-service:8443")
+# client2 使用 http://explicit-service:8443（覆盖全局配置）
+```
+
+---
+
+## `encrypted_aes_key` 参数说明
+
+`upload_config` / `update_config` 里的 `encrypted_aes_key` 不是“私钥”也不是“要上传的公钥”，而是：
+
+1. 客户端每次上传时临时生成一个随机 AES 会话密钥；
+2. 用 RSA 公钥加密这个 AES 会话密钥；
+3. 将这个密文（Base64）作为 `encrypted_aes_key` 上传。
+
+因此这个字段的本质是“被加密后的会话密钥密文”。  
+客户端绝不会上传私钥；注册时上传的公钥用于服务端绑定用户身份和后续二次加密流程。
 
 ---
 
@@ -282,3 +349,7 @@ tkzs_config_service/
 ## License
 
 [LGPL-2.1](LICENSE)
+
+---
+
+更多配置优先级与加密参数说明见：`docs/configuration-priority.md`
