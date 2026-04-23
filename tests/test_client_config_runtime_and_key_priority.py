@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from tkzs_config_service_client import ConfigServiceClient, configure_client, reset_client_config
+import pytest
+
+from tkzs_config_service_client import (
+    ConfigServiceClient,
+    ConfigServiceRuntimeError,
+    configure_client,
+    reset_client_config,
+)
 from tkzs_config_service_client.crypto import RSACrypto
 
 
@@ -8,6 +15,14 @@ def _prepare_private_key(path: Path) -> None:
     private_pem, _ = RSACrypto.generate_keypair()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(private_pem)
+
+
+def _prepare_keypair(private_path: Path, public_path: Path) -> None:
+    private_pem, public_pem = RSACrypto.generate_keypair()
+    private_path.parent.mkdir(parents=True, exist_ok=True)
+    public_path.parent.mkdir(parents=True, exist_ok=True)
+    private_path.write_bytes(private_pem)
+    public_path.write_bytes(public_pem)
 
 
 def test_runtime_configure_client_affects_new_instance(tmp_path: Path):
@@ -42,12 +57,11 @@ def test_login_private_key_priority(tmp_path: Path):
     default_private = ssl_dir / f"{username}_private_key.pem"
     default_public = ssl_dir / f"{username}_public_key.pem"
 
-    _prepare_private_key(login_arg_private)
+    _prepare_keypair(login_arg_private, default_public)
     _prepare_private_key(config_private)
     private_pem, public_pem = RSACrypto.generate_keypair()
     default_private.parent.mkdir(parents=True, exist_ok=True)
     default_private.write_bytes(private_pem)
-    default_public.write_bytes(public_pem)
 
     configure_client(ssl_dir=ssl_dir, private_key_path=config_private)
     client = ConfigServiceClient(config_service_url="http://unit-test")
@@ -61,9 +75,13 @@ def test_login_private_key_priority(tmp_path: Path):
     client.login(username, "password123", private_key_path=login_arg_private)
     assert client.private_key_path == login_arg_private
 
+    # 改为 config 私钥来源时，同步更新该用户公钥以匹配 config 私钥
+    _prepare_keypair(config_private, default_public)
     client.login(username, "password123")
     assert client.private_key_path == config_private
 
+    # 改为默认私钥来源时，同步更新该用户公钥以匹配默认私钥
+    default_public.write_bytes(public_pem)
     configure_client(private_key_path=None)
     client.login(username, "password123")
     assert client.private_key_path == default_private
@@ -128,6 +146,80 @@ def test_login_level_priority_login_over_config_with_private_key_dir(tmp_path: P
 
 
 def test_encrypt_uses_private_key_when_public_missing(tmp_path: Path):
+    reset_client_config()
+
+
+def test_login_rejects_mismatched_private_key_and_clears_token(tmp_path: Path):
+    reset_client_config()
+    ssl_dir = tmp_path / "ssl"
+    username = "security_user"
+    correct_private = ssl_dir / f"{username}_private_key.pem"
+    public_path = ssl_dir / f"{username}_public_key.pem"
+    wrong_private = tmp_path / "keys" / "wrong_private.pem"
+    token_dir = tmp_path / "token_dir"
+
+    correct_private_pem, correct_public_pem = RSACrypto.generate_keypair()
+    correct_private.parent.mkdir(parents=True, exist_ok=True)
+    correct_private.write_bytes(correct_private_pem)
+    public_path.write_bytes(correct_public_pem)
+    _prepare_private_key(wrong_private)
+
+    configure_client(ssl_dir=ssl_dir, token_dir=token_dir)
+    client = ConfigServiceClient(config_service_url="http://unit-test")
+
+    def _fake_login(_username: str, _password: str, _public_key: str):
+        payload = {
+            "access_token": "fake-token",
+            "expires_in": 3600,
+            "user_id": 1,
+            "username": username,
+        }
+        client.token_manager.save_token(**payload)
+        return payload
+
+    client.api_client.login = _fake_login
+
+    with pytest.raises(ConfigServiceRuntimeError, match="does not match"):
+        client.login(username, "password123", private_key_path=wrong_private)
+
+    assert client.token_manager.get_token() is None
+    reset_client_config()
+
+
+def test_login_derives_public_key_when_local_missing(tmp_path: Path):
+    reset_client_config()
+    ssl_dir = tmp_path / "ssl"
+    username = "derive_pub_user"
+    private_path = ssl_dir / f"{username}_private_key.pem"
+    public_path = ssl_dir / f"{username}_public_key.pem"
+
+    private_pem, public_pem = RSACrypto.generate_keypair()
+    private_path.parent.mkdir(parents=True, exist_ok=True)
+    private_path.write_bytes(private_pem)
+
+    configure_client(ssl_dir=ssl_dir)
+    client = ConfigServiceClient(config_service_url="http://unit-test")
+    captured: dict = {}
+
+    def _fake_login(_username: str, _password: str, _public_key: str):
+        captured["username"] = _username
+        captured["public_key"] = _public_key
+        payload = {
+            "access_token": "fake-token",
+            "expires_in": 3600,
+            "user_id": 1,
+            "username": _username,
+        }
+        client.token_manager.save_token(**payload)
+        return payload
+
+    client.api_client.login = _fake_login
+    client.login(username, "password123")
+
+    assert captured["username"] == username
+    assert captured["public_key"] == public_pem.decode("utf-8")
+    assert public_path.exists()
+    assert public_path.read_bytes() == public_pem
     reset_client_config()
     private_key_path = tmp_path / "only_private.pem"
     _prepare_private_key(private_key_path)

@@ -172,6 +172,71 @@ class ConfigServiceClient:
             DEFAULT_CLIENT_CONFIG.public_key_path_for_user(normalized),
         )
 
+    def _resolve_login_public_key(
+            self,
+            username: str,
+            private_key_path: Path,
+            public_key_path: Path,
+    ) -> bytes:
+        """
+        解析登录要上送服务端的公钥（用于账号/密码/公钥三要素校验）。
+
+        规则：
+        1) 私钥文件必须存在且可解析；
+        2) 若本地已有公钥，要求与私钥推导公钥一致，返回本地公钥；
+        3) 若本地无公钥，则由私钥推导生成，并落盘后返回。
+        """
+        if not private_key_path.exists():
+            raise ConfigServiceRuntimeError(
+                f"Private key not found for user '{username}': {private_key_path}. "
+                "Login is rejected because public key cannot be generated for server verification."
+            )
+
+        try:
+            private_key_obj = RSACrypto.load_private_key(load_private_key(private_key_path))
+            derived_public_pem = private_key_obj.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception as e:
+            raise ConfigServiceRuntimeError(
+                f"Invalid RSA private key format in {private_key_path}: {e}"
+            )
+
+        if public_key_path.exists():
+            try:
+                expected_public_obj = RSACrypto.load_public_key(public_key_path.read_bytes())
+                expected_public_pem = expected_public_obj.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
+            except Exception as e:
+                raise ConfigServiceRuntimeError(
+                    f"Invalid RSA public key format in {public_key_path}: {e}"
+                )
+
+            if expected_public_pem != derived_public_pem:
+                raise ConfigServiceRuntimeError(
+                    "The provided private key does not match the user's public key. "
+                    "Login is rejected for security reasons."
+                )
+            return expected_public_pem
+
+        try:
+            public_key_path.parent.mkdir(parents=True, exist_ok=True)
+            public_key_path.write_bytes(derived_public_pem)
+        except IOError as e:
+            raise ConfigServiceRuntimeError(
+                f"Failed to persist derived public key to {public_key_path}: {e}"
+            )
+
+        self.logger.info(
+            "Public key not found locally for user '%s'; derived from private key and saved to: %s",
+            username,
+            public_key_path
+        )
+        return derived_public_pem
+
     def _load_or_generate_register_keys(
             self,
             user_private_key_path: Optional[Union[str, Path]] = None,
@@ -364,8 +429,6 @@ class ConfigServiceClient:
         self.logger.info(f"Logging in user: {username}")
 
         try:
-            result = self.api_client.login(username, password)
-
             normalized_username = self._normalize_username(username)
 
             # 私钥路径优先级（跨层）：
@@ -388,19 +451,20 @@ class ConfigServiceClient:
                 resolved_private_key_path, _ = self._get_key_paths_for_user(username)
 
             _, public_key_path = self._get_key_paths_for_user(username)
-            if public_key_path.exists():
-                self.public_key_path = public_key_path
+            login_public_key_pem = self._resolve_login_public_key(
+                username,
+                resolved_private_key_path,
+                public_key_path,
+            )
 
-            if resolved_private_key_path.exists():
-                self.private_key_path = resolved_private_key_path
-            else:
-                self.logger.warning(
-                    "RSA private key for user '%s' was not found at: %s. "
-                    "Without the correct private key, upload/download/update operations will fail. "
-                    "If you switched devices, please copy and configure your original private key file.",
-                    username,
-                    resolved_private_key_path
-                )
+            result = self.api_client.login(
+                username,
+                password,
+                login_public_key_pem.decode("utf-8"),
+            )
+            self.private_key_path = resolved_private_key_path
+            self.public_key_path = public_key_path
+
             self.logger.info(f"✅ Login successful for user: {username}")
             return result
         except APIError as e:

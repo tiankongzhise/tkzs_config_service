@@ -1,0 +1,7 @@
+{
+    "note":"not copy this file into your project, it is for self development, not used in production",
+"publish test pypi":"uv publish --index testpypi",
+ "publish pypi":"uv publish --index pypi",
+ "add testpypi package":"uv add tkzs-config-service-client --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple --index-strategy unsafe-best-match",
+ "go build service":'$env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED=0; go build -trimpath -ldflags="-s -w" -o config-service .'
+}

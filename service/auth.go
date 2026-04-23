@@ -177,8 +177,9 @@ type RegisterRequest struct {
 
 // LoginRequest 登录请求
 type LoginRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
+	Username  string `json:"username"`
+	Password  string `json:"password"`
+	PublicKey string `json:"public_key"`
 }
 
 // JSONResponse JSON响应结构
