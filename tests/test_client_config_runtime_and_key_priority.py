@@ -1,4 +1,6 @@
+import os
 from pathlib import Path
+from dataclasses import dataclass
 
 import pytest
 
@@ -9,6 +11,18 @@ from tkzs_config_service_client import (
     reset_client_config,
 )
 from tkzs_config_service_client.crypto import RSACrypto
+
+
+@dataclass
+class TestDevConfig:
+    """测试环境配置，优先从环境变量获取，否则使用默认值。"""
+
+    # 测试用服务 URL，优先从环境变量获取
+    service_url: str = os.getenv("TEST_CONFIG_SERVICE_URL", "http://unit-test")
+    runtime_config_url: str = os.getenv("TEST_RUNTIME_CONFIG_URL", "http://runtime-config-service")
+
+
+TEST_DEV = TestDevConfig()
 
 
 def _prepare_private_key(path: Path) -> None:
@@ -32,7 +46,7 @@ def test_runtime_configure_client_affects_new_instance(tmp_path: Path):
     custom_private_key = custom_ssl_dir / "runtime_private.pem"
 
     configure_client(
-        service_url="http://runtime-config-service",
+        service_url=TEST_DEV.runtime_config_url,
         ssl_dir=custom_ssl_dir,
         token_dir=custom_token_dir,
         private_key_path=custom_private_key,
@@ -40,7 +54,7 @@ def test_runtime_configure_client_affects_new_instance(tmp_path: Path):
     )
 
     client = ConfigServiceClient()
-    assert client.config_service_url == "http://runtime-config-service"
+    assert client.config_service_url == TEST_DEV.runtime_config_url
     assert client.private_key_path == custom_private_key
     assert client.token_manager.token_dir == custom_token_dir
     assert client.api_client.timeout == 17
@@ -64,7 +78,7 @@ def test_login_private_key_priority(tmp_path: Path):
     default_private.write_bytes(private_pem)
 
     configure_client(ssl_dir=ssl_dir, private_key_path=config_private)
-    client = ConfigServiceClient(config_service_url="http://unit-test")
+    client = ConfigServiceClient(config_service_url=TEST_DEV.service_url)
     client.api_client.login = lambda *_args, **_kwargs: {
         "access_token": "fake-token",
         "expires_in": 3600,
@@ -225,7 +239,7 @@ def test_login_derives_public_key_when_local_missing(tmp_path: Path):
     _prepare_private_key(private_key_path)
 
     client = ConfigServiceClient(
-        config_service_url="http://unit-test",
+        config_service_url=TEST_DEV.service_url,
         private_key_path=private_key_path,
         public_key_path=tmp_path / "missing_public.pem",
     )

@@ -1,6 +1,11 @@
+import os
 from pathlib import Path
 
 from tkzs_config_service_client import ConfigServiceClient, configure_client
+
+
+# 测试环境配置，优先从环境变量获取，否则使用默认值
+SERVICE_URL: str = os.getenv("CASE_CONFIG_SERVICE_URL", "http://localhost:8443")
 
 
 def main() -> None:
@@ -14,11 +19,10 @@ def main() -> None:
 
     # 先配置全局默认：仅指定私钥目录（会自动按用户名拼接文件名）
     configure_client(
-        service_url="http://localhost:8443",
         private_key_dir="D:/secure_keys/global",
     )
 
-    client = ConfigServiceClient()
+    client = ConfigServiceClient(config_service_url=SERVICE_URL)
 
     # 场景1：仅传 login(private_key_dir)，会使用：
     # D:/secure_keys/login_dir/{normalized_username}_private_key.pem

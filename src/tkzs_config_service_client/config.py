@@ -11,7 +11,7 @@ class ClientConfig:
     """配置服务客户端默认配置。"""
 
     service_url_env: str = "CONFIG_SERVICE_URL"
-    default_service_url: str = "https://config-service.hnzzzsw.com"
+    default_service_url: str = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8443")
     token_dir_name: str = "tkzs_service"
     ssl_dir_name: str = ".ssl"
     key_file_prefix: str = "user"
