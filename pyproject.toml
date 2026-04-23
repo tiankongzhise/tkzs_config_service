@@ -4,7 +4,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 [project]
 name = "tkzs-config-service-client"
-version = "0.2.0"
+version = "0.3.0"
 description = "tkzs config service client,get config or env from Configuration Center"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -12,6 +12,8 @@ dependencies = [
     "cryptography>=46.0.7",
     "python-dotenv>=1.2.2",
     "requests>=2.33.1",
+    "PyJWT>=2.10.1",
+    "bcrypt>=4.3.0",
 ]
 [tool.hatch.build]
 src = "src"  # 必须放这里！
@@ -28,15 +30,18 @@ exclude = [
   "scripts/",
   "*.pyc",
   "__pycache__/",
+  "tkzs-config-service",
+  "TODO*.md",
+  "temp/",
 ]
 
-# [[tool.uv.index]]
-# name = "testpypi"
-# url = "https://test.pypi.org/simple/"
-# publish-url = "https://test.pypi.org/legacy/"
-# explicit = true
-
 [[tool.uv.index]]
-name = "pypi"
-url = "https://pypi.org/simple/"
-publish-url = "https://upload.pypi.org/legacy/"  # 👈 正式上传地址
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+publish-url = "https://test.pypi.org/legacy/"
+explicit = true
+
+# [[tool.uv.index]]
+# name = "pypi"
+# url = "https://pypi.org/simple/"
+# publish-url = "https://upload.pypi.org/legacy/"  # 👈 正式上传地址

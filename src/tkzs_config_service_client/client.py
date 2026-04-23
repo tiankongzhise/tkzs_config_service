@@ -1,71 +1,88 @@
 """
 配置服务客户端模块
 
-提供从远程配置服务安全获取配置文件的功能。客户端使用RSA公钥加密认证信息，
-请求指定的配置文件（支持.toml或.env格式），获取后可根据需要：
-- 将配置项设置到当前进程的环境变量中（支持TOML扁平化或.env加载）
-- 将配置文件内容写入本地文件
+提供从远程配置服务安全获取配置文件的功能。支持用户注册、登录、
+配置的上传、更新、删除和下载。采用AES+RSA双重加密确保数据安全。
 
 典型用法：
-    config_client = ConfigServiceClient()
-    config_client.load_config_settings('set_temp_env')
+    from tkzs_config_service import ConfigServiceClient
+
+    # 初始化客户端
+    client = ConfigServiceClient()
+
+    # 注册（首次使用）
+    client.register("my_username", "my_password")
+
+    # 登录
+    client.login("my_username", "my_password")
+
+    # 上传配置
+    client.upload_config("mysql.env", "/path/to/mysql.env")
+
+    # 获取配置列表
+    configs = client.list_configs()
+    print(configs)
+
+    # 下载配置
+    client.get_config("mysql.env", save_path="/tmp/mysql.env")
+
+    # 更新配置
+    client.update_config("mysql.env", "/path/to/new_mysql.env")
+
+    # 删除配置
+    client.delete_config("mysql.env")
 
 依赖环境变量：
-    CONFIG_SERVICE_URL    : 配置服务的URL地址
-    CONFIG_SERVICE_PASSWORD : 用于生成认证HMAC的密码
+    CONFIG_SERVICE_URL    : 配置服务的URL地址（可选，构造函数可指定）
 """
 
-from pathlib import Path
-import os 
-import requests
-import hashlib
-import hmac
-import secrets
-import time
-import tomllib
-from typing import Any, Callable, Literal
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.backends import default_backend
-from dotenv import load_dotenv
+import base64
 import io
 import logging
-from typing import Protocol
+import os
+import tomllib
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Union
+
+from dotenv import load_dotenv
+from cryptography.hazmat.primitives import serialization
+
+from .api import APIClient, APIError
+from .auth import TokenManager
+from .crypto import RSACrypto, AESCrypto, save_private_key, load_private_key, CryptoError
+from .config import DEFAULT_CLIENT_CONFIG
+
 
 class ConfigServiceInitError(Exception):
     """配置服务客户端初始化错误"""
     pass
 
+
 class ConfigServiceRuntimeError(Exception):
     """配置服务运行时错误（如请求失败、文件写入失败等）"""
     pass
 
-class ConfigServiceResponeseCodeError(Exception):
+
+class ConfigServiceResponseCodeError(Exception):
+    """响应状态码错误"""
     pass
 
-class LoggerProtocol(Protocol):
-    """日志记录器协议，定义了客户端所需的日志方法"""
-    def debug(self,*args,**kwargs):
-        ...
-    def info(self,*args,**kwargs):
-        ...
-    def warning(self,*args,**kwargs):
-        ...
-    def error(self,*args,**kwargs):
-        ...
-    def log(self,*args,**kwargs):
-        ...
+
+DEFAULT_SSL_DIR = DEFAULT_CLIENT_CONFIG.default_ssl_dir
+DEFAULT_PRIVATE_KEY_PATH = DEFAULT_CLIENT_CONFIG.default_private_key_path
+DEFAULT_PUBLIC_KEY_PATH = DEFAULT_CLIENT_CONFIG.default_public_key_path
+
 
 def _flatten_toml(
-        toml_data: dict[str, Any],
+        toml_data: dict,
         parent_key: str = "",
         sep: str = "_"
-    ) -> dict[str, str]:
+) -> dict:
     """
     递归扁平化TOML字典，将嵌套结构转换为单层键值对。
 
     例如：
-        {"db": {"host": "localhost", "port": 3306}} 
+        {"db": {"host": "localhost", "port": 3306}}
         转换为 {"DB_HOST": "localhost", "DB_PORT": "3306"}
 
     Args:
@@ -79,342 +96,682 @@ def _flatten_toml(
     items = []
     for k, v in toml_data.items():
         new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        
+
         if isinstance(v, dict):
             items.extend(_flatten_toml(v, new_key, sep=sep).items())
         else:
-            # 转成字符串（环境变量只能存字符串）
             items.append((new_key.upper(), str(v)))
     return dict(items)
 
-def get_logger(name: str, 
-               default_level: Literal['debug','info','warning','error'], 
-               is_print: bool) -> logging.Logger:
-    """
-    获取并配置一个简单的控制台日志记录器。
-
-    Args:
-        name: 日志记录器名称
-        default_level: 默认日志级别，可选 'debug', 'info', 'warning', 'error'
-        is_print: 是否输出到控制台；若为True则添加StreamHandler，否则不添加任何处理器
-
-    Returns:
-        配置好的logging.Logger实例
-    """
-    logger = logging.getLogger(name)
-    logger.handlers.clear()
-    logger_level_map = {
-        'debug':logging.DEBUG,
-        "info":logging.INFO,
-        "warning":logging.WARNING,
-        "error":logging.ERROR
-
-    }
-    logger_level = logger_level_map[default_level]
-    if is_print:
-        if not logger.handlers:  # 避免重复添加处理器
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            logger.setLevel(logger_level)  # 默认级别
-    return logger
 
 class ConfigServiceClient:
     """
-    配置服务客户端，用于从远程服务安全获取配置文件并应用。
+    配置服务客户端，用于从远程服务安全管理配置文件。
 
-    客户端使用RSA公钥加密认证信息（包含盐值、HMAC、配置名、时间戳、一次性随机数），
-    请求成功后根据配置文件类型（.toml或.env）将配置加载到环境变量，
-    或写入本地文件。
-
-    环境变量要求：
-        - CONFIG_SERVICE_URL: 配置服务的URL（若未通过参数提供）
-        - CONFIG_SERVICE_PASSWORD: 用于认证的密码（若未通过参数提供）
+    支持用户注册、登录、配置的上传、更新、删除和下载。
+    所有配置文件采用AES+RSA双重加密确保安全。
 
     Attributes:
-        config_name: 要获取的配置文件名
         config_service_url: 配置服务的URL
-        public_key: RSA公钥文件路径
-        password: 认证密码
-        set_temp_env: 用于设置环境变量的回调函数
+        private_key_path: 用户RSA私钥文件路径
+        public_key_path: 用户RSA公钥文件路径
+        api_client: API客户端实例
+        token_manager: Token管理器实例
         logger: 日志记录器实例
-        rsp: 最后一次成功请求的Response对象（在load_config_settings后可用）
+        rsp: 最后一次成功请求的Response对象
     """
 
-    def __init__(self,
-                 config_name: str = 'mysql.env',
-                 config_service_url: str | None = None,
-                 public_key: str | Path | None = None,
-                 password: str | None = None,
-                 set_temp_env: Callable | None = None,
-                 *,
-                 logger: LoggerProtocol | None = None,
-                 default_logger_level: Literal['debug','info','warning','error'] = 'info',
-                 default_logger_print: bool = True):
+    def __init__(
+            self,
+            config_service_url: Optional[str] = None,
+            private_key_path: Optional[Path] = None,
+            public_key_path: Optional[Path] = None,
+            token_dir: Optional[Path] = None,
+            *,
+            logger: Optional[logging.Logger] = None,
+            default_logger_level: Literal['debug', 'info', 'warning', 'error'] = 'info',
+            default_logger_print: bool = True
+    ):
         """
         初始化配置服务客户端。
 
         Args:
-            config_name: 要获取的配置文件名，默认为'config.toml'
             config_service_url: 配置服务的URL。若为None，则从环境变量CONFIG_SERVICE_URL读取
-            public_key: RSA公钥文件路径。若为None，默认使用 ~/.ssl/client_public_key.pem
-            password: 认证密码。若为None，则从环境变量CONFIG_SERVICE_PASSWORD读取
-            set_temp_env: 自定义的设置环境变量回调函数。若不提供，则根据文件扩展名使用内置逻辑
-            logger: 外部传入的日志记录器，需符合LoggerProtocol协议。若为None则创建默认logger
+            private_key_path: 用户RSA私钥文件路径。
+            public_key_path: 用户RSA公钥文件路径。
+            token_dir: Token存储目录，默认为 ~/.config/tkzs_service
+            logger: 外部传入的日志记录器
             default_logger_level: 默认logger的日志级别
             default_logger_print: 默认logger是否输出到控制台
 
         Raises:
-            ConfigServiceInitError: 当必需的环境变量缺失、公钥文件不存在或参数无效时抛出
+            ConfigServiceInitError: 当必需的环境变量缺失或参数无效时抛出
         """
-        self.config_name = config_name
-        self.config_service_url: str = config_service_url or self._safe_get_env('CONFIG_SERVICE_URL')
-        self.public_key = self._safe_public_key(public_key)
-        self.password: str = password or self._safe_get_env('CONFIG_SERVICE_PASSWORD')
-        self.set_temp_env = self._safe_set_temp_env(set_temp_env)
-        self.logger = self._safe_logger(logger, default_logger_level, default_logger_print)
+        # 加载.env文件
+        load_dotenv()
 
-    def _safe_logger(self, 
-                     logger: LoggerProtocol | None, 
-                     default_logger_level: Literal['debug','info','warning','error'], 
-                     default_logger_print: bool) -> LoggerProtocol:
+        # 获取服务URL
+        self.config_service_url: str = DEFAULT_CLIENT_CONFIG.get_service_url(config_service_url)
+
+        # 密钥路径
+        self.private_key_path = private_key_path or DEFAULT_PRIVATE_KEY_PATH
+        self.public_key_path = public_key_path or DEFAULT_PUBLIC_KEY_PATH
+
+        # 初始化组件
+        self.token_manager = TokenManager(token_dir)
+        self.api_client = APIClient(self.config_service_url, self.token_manager, logger)
+        self.logger = logger or self._get_default_logger(default_logger_level, default_logger_print)
+
+        # 响应对象
+        self.rsp: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def _normalize_username(username: str) -> str:
+        safe_name = "".join(c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in username.strip())
+        return safe_name or DEFAULT_CLIENT_CONFIG.key_file_prefix
+
+    def _get_key_paths_for_user(self, username: str) -> tuple[Path, Path]:
+        normalized = self._normalize_username(username)
+        return (
+            DEFAULT_CLIENT_CONFIG.private_key_path_for_user(normalized),
+            DEFAULT_CLIENT_CONFIG.public_key_path_for_user(normalized),
+        )
+
+    def _load_or_generate_register_keys(
+            self,
+            user_private_key_path: Optional[Union[str, Path]] = None,
+            user_public_key_path: Optional[Union[str, Path]] = None,
+    ) -> tuple[bytes, bytes, str]:
         """
-        安全获取日志记录器。若未提供外部logger，则创建默认logger。
+        读取用户提供的RSA密钥对（可选）或自动生成。
 
-        Args:
-            logger: 外部传入的logger或None
-            default_logger_level: 默认logger的级别
-            default_logger_print: 默认logger是否打印到控制台
-
-        Returns:
-            可用的LoggerProtocol实例
+        返回:
+            (private_pem, public_pem, source)
+            source: "provided" or "generated"
         """
-        if logger is None:
-            safe_logger = get_logger("config_service_default_logger", default_logger_level, default_logger_print)
-        else:
-            safe_logger = logger
-        return safe_logger
-    
-    def _safe_set_temp_env(self, set_temp_env: Callable | None) -> Callable:
-        """
-        安全处理set_temp_env回调。若未提供或不可调用，则使用默认实现。
+        if user_private_key_path is None and user_public_key_path is None:
+            try:
+                private_pem, public_pem = RSACrypto.generate_keypair()
+                return private_pem, public_pem, "generated"
+            except CryptoError as e:
+                raise ConfigServiceInitError(f"Failed to generate RSA keypair: {e}")
 
-        Args:
-            set_temp_env: 自定义回调或None
-
-        Returns:
-            有效的回调函数（默认实现或用户提供的可调用对象）
-        """
-        if set_temp_env is None:
-            return self._default_set_temp_env
-        if not callable(set_temp_env):
-            return self._default_set_temp_env
-        return set_temp_env
-
-    def _toml_to_temp_env(self) -> None:
-        """
-        将响应内容（TOML格式）解析并设置到环境变量。
-        使用_flatten_toml将嵌套结构扁平化，键名转为大写后存入os.environ。
-        """
-        data = tomllib.loads(self.rsp.text)
-        flatten_data = _flatten_toml(data)
-        for key, value in flatten_data.items():
-            os.environ[key] = value
-
-    def _env_to_temp_env(self) -> None:
-        """
-        将响应内容（.env格式）通过python-dotenv加载到环境变量。
-        """
-        load_dotenv(stream=io.StringIO(self.rsp.text))
-
-    def _default_set_temp_env(self) -> None:
-        """
-        默认的环境变量设置逻辑。
-        根据self.config_name的后缀名判断：
-            - .toml: 调用_toml_to_temp_env
-            - .env : 调用_env_to_temp_env
-        其他后缀则记录警告且不做任何操作。
-        """
-        temp_file = Path(self.config_name)
-        suffix = '.'.join(temp_file.suffixes)
-        if suffix == '.toml':
-            self._toml_to_temp_env()
-        elif suffix == '.env':
-            self._env_to_temp_env()
-        else:
-            self.logger.info(f"warning:set temp env is not geving or Callable,and config file is {suffix} not .toml or .env ,default function just support .toml and .env,nothing will be done")
-
-    def _safe_get_env(self, env_name: str) -> str:
-        """
-        安全获取环境变量，若不存在则抛出初始化错误。
-
-        Args:
-            env_name: 环境变量名
-
-        Returns:
-            环境变量的值
-
-        Raises:
-            ConfigServiceInitError: 当环境变量未设置时
-        """
-        value = os.getenv(env_name)
-        if value:
-            return value
-        else:
-            raise ConfigServiceInitError(f'{env_name} not found!')
-
-    def _safe_public_key(self, public_key: str | Path | None = None) -> Path:
-        """
-        确定公钥文件路径并检查其存在性。
-
-        Args:
-            public_key: 用户指定的公钥路径，可为None、字符串或Path对象
-
-        Returns:
-            有效的公钥文件Path对象
-
-        Raises:
-            ConfigServiceInitError: 当公钥文件不存在时
-        """
-        if public_key is None:
-            safe_public_key = Path.home() / ".ssl" / "client_public_key.pem"
-        else:
-            safe_public_key = Path(public_key)
-        if not safe_public_key.exists():
-            raise ConfigServiceInitError(f"public_key:{safe_public_key} is not exists!")
-        return safe_public_key
-
-    def _encrypt_with_rsa(self, data: bytes) -> bytes:
-        """
-        使用RSA公钥对数据进行PKCS#1 v1.5填充加密。
-
-        Args:
-            data: 待加密的字节数据
-
-        Returns:
-            加密后的密文字节
-
-        Raises:
-            可能抛出cryptography相关的异常（如公钥格式错误）
-        """
-        with open(self.public_key, "rb") as f:
-            public_key = serialization.load_pem_public_key(
-                f.read(),
-                backend=default_backend()
+        # 用户自备密钥时，要求公私钥成对提供，避免出现只能“部分校验”的歧义状态
+        if user_private_key_path is None or user_public_key_path is None:
+            raise ConfigServiceInitError(
+                "Custom RSA files must provide both user_private_key_path and user_public_key_path"
             )
-        return public_key.encrypt(data, padding.PKCS1v15())
 
-    def _write_local_file(self) -> str:
+        private_path = Path(user_private_key_path)
+        if not private_path.exists():
+            raise ConfigServiceInitError(f"Private key file not found: {private_path}")
+
+        try:
+            provided_private_pem = private_path.read_bytes()
+            private_key_obj = RSACrypto.load_private_key(provided_private_pem)
+            normalized_private_pem = private_key_obj.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            derived_public_pem = private_key_obj.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception as e:
+            raise ConfigServiceInitError(
+                f"Invalid RSA private key format in {private_path}: {e}"
+            )
+
+        public_path = Path(user_public_key_path)
+        if not public_path.exists():
+            raise ConfigServiceInitError(f"Public key file not found: {public_path}")
+        try:
+            provided_public_pem = public_path.read_bytes()
+            public_key_obj = RSACrypto.load_public_key(provided_public_pem)
+            normalized_public_pem = public_key_obj.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except Exception as e:
+            raise ConfigServiceInitError(
+                f"Invalid RSA public key format in {public_path}: {e}"
+            )
+        if normalized_public_pem != derived_public_pem:
+            raise ConfigServiceInitError(
+                "Provided RSA public key does not match the provided private key"
+            )
+
+        return normalized_private_pem, derived_public_pem, "provided"
+
+    def _get_default_logger(self, level: str, print_enabled: bool) -> logging.Logger:
+        """获取默认日志记录器"""
+        logger = logging.getLogger("config_service_client")
+        logger.handlers.clear()
+        logger.setLevel({
+            'debug': logging.DEBUG,
+            'info': logging.INFO,
+            'warning': logging.WARNING,
+            'error': logging.ERROR
+        }.get(level, logging.INFO))
+
+        if print_enabled:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
+        return logger
+
+    def register(
+            self,
+            username: str,
+            password: str,
+            user_private_key_path: Optional[Union[str, Path]] = None,
+            user_public_key_path: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
         """
-        将响应内容（配置文件）写入本地文件。
-        文件名格式为 received_{self.config_name}，保存在当前工作目录。
+        用户注册。
+
+        支持两种方式：
+        1) 用户成对提供RSA私钥和公钥（会校验格式并校验两者是否匹配）
+        2) 用户不提供时，客户端自动生成RSA密钥对
+
+        注册时会将该用户密钥写入客户端默认目录，供后续上传/下载/更新时使用。
+
+        Args:
+            username: 用户名
+            password: 密码（至少6个字符）
+            user_private_key_path: 用户自备RSA私钥文件路径（PEM，可选；若提供则公钥也必须提供）
+            user_public_key_path: 用户自备RSA公钥文件路径（PEM，可选；若提供则私钥也必须提供）
 
         Returns:
-            写入的本地文件名
-        """
-        local_file_name = f"received_{self.config_name}"
-        with open(local_file_name, "wb") as f:
-            f.write(self.rsp.content)
-        return local_file_name
-
-    def _load_settings(self, model: Literal['write_local_file','set_temp_env','all']) -> None:
-        """
-        根据指定的模式应用配置（设置环境变量和/或写入文件）。
-
-        Args:
-            model: 操作模式
-                - 'set_temp_env': 仅调用set_temp_env将配置加载到环境变量
-                - 'write_local_file': 仅将响应内容写入本地文件
-                - 'all': 同时执行上述两项操作
+            注册结果，包含user_id
 
         Raises:
-            ConfigServiceRuntimeError: 当执行过程中发生任何异常时，将原始异常包装后抛出
+            ConfigServiceInitError: 密钥生成失败或用户提供的密钥格式不正确
+            ConfigServiceRuntimeError: 注册失败
         """
+        if len(password) < 6:
+            raise ConfigServiceInitError("Password must be at least 6 characters")
+        if not username or not username.strip():
+            raise ConfigServiceInitError("Username is required")
+
+        self.logger.info(f"Starting registration for user: {username}")
+
+        private_pem, public_pem, key_source = self._load_or_generate_register_keys(
+            user_private_key_path=user_private_key_path,
+            user_public_key_path=user_public_key_path,
+        )
+
+        # 转换为字符串
+        public_key_str = public_pem.decode('utf-8')
+
+        # 调用注册API
         try:
-            if model == 'set_temp_env':
-                self.set_temp_env()
-            elif model == "write_local_file":
-                self._write_local_file()
-            elif model == 'all':
-                self.set_temp_env()
-                self._write_local_file()
-            else:
-                raise ConfigServiceRuntimeError(f"load_config_settings model get unsupport key:{model},check input ")
-        except Exception as e:
-            raise ConfigServiceRuntimeError(f'load config fail at model:{model},exception:{e}') from e
+            result = self.api_client.register(username, password, public_key_str)
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Registration failed: {e}")
 
-    # ===================== 修改点：新认证协议 =====================
-    def load_config_settings(self, model: Literal['write_local_file','set_temp_env','all'] = "set_temp_env") -> None:
+        # 保存私钥到本地
+        try:
+            private_key_path, public_key_path = self._get_key_paths_for_user(username)
+            save_private_key(private_pem, private_key_path)
+            public_key_path.parent.mkdir(parents=True, exist_ok=True)
+            public_key_path.write_bytes(public_pem)
+            self.private_key_path = private_key_path
+            self.public_key_path = public_key_path
+            self.logger.info(f"Keys saved to {private_key_path} and {public_key_path}")
+        except IOError as e:
+            raise ConfigServiceRuntimeError(f"Failed to save keys: {e}")
+
+        if key_source == "generated":
+            self.logger.warning(
+                "RSA private key auto-generated and saved at: %s. "
+                "Please back up this private key securely. "
+                "When switching devices, copy and configure the same private key for this account, "
+                "otherwise upload/download/update operations will fail even with correct username/password.",
+                private_key_path
+            )
+        else:
+            self.logger.info(
+                "Using user-provided RSA private key (validated) and synchronized to: %s",
+                private_key_path
+            )
+
+        self.logger.info(f"✅ Registration successful for user: {username} (ID: {result.get('user_id')})")
+        return result
+
+    def login(self, username: str, password: str) -> Dict[str, Any]:
         """
-        向配置服务发起请求，获取配置文件并根据模型应用配置。
+        用户登录。
 
-        工作流程（已升级）：
-            1. 生成随机盐值（salt）和一次性随机数（nonce）
-            2. 获取当前Unix时间戳（timestamp）
-            3. 构造消息字符串 f"{salt}:{filename}:{timestamp}:{nonce}"
-            4. 使用密码作为密钥计算 HMAC-SHA256(message)
-            5. 将 salt, hmac, filename, timestamp, nonce 用冒号拼接成明文
-            6. 使用RSA公钥加密明文后发送POST请求
-            7. 若响应状态码为200，则根据model参数调用_load_settings应用配置
+        调用服务端登录API，保存JWT Token到本地。
 
         Args:
-            model: 应用模式，默认为'set_temp_env'。可选值：
-                - 'set_temp_env': 将配置加载到当前进程的环境变量
-                - 'write_local_file': 将配置写入本地文件（前缀received_）
-                - 'all': 同时进行环境变量加载和文件写入
+            username: 用户名
+            password: 密码
 
-        Note:
-            该方法会设置self.rsp属性为成功的响应对象，供内部方法使用。
-            请求时默认启用SSL证书验证（verify=True），若证书验证失败会记录错误。
-            服务端现统一返回401表示失败（密码错误、文件不存在、重放攻击等），客户端不再区分具体原因。
+        Returns:
+            登录结果，包含access_token、expires_in等
+
+        Raises:
+            ConfigServiceRuntimeError: 登录失败
         """
-        # ----- 修改点1：生成 salt 和 nonce（各16字节hex）-----
-        salt = secrets.token_hex(16)      # 32字符hex
-        nonce = secrets.token_hex(16)     # 32字符hex
-        
-        # ----- 修改点2：获取当前Unix时间戳（秒）-----
-        timestamp = str(int(time.time()))
-        
-        # ----- 修改点3：构造消息并计算 HMAC-SHA256 -----
-        # 消息格式： salt:filename:timestamp:nonce
-        message = f"{salt}:{self.config_name}:{timestamp}:{nonce}"
-        # 使用密码作为HMAC密钥（注意：密码需为bytes）
-        hmac_digest = hmac.new(
-            self.password.encode('utf-8'),
-            message.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        
-        # ----- 修改点4：构造明文请求体（格式：salt:hmac:filename:timestamp:nonce）-----
-        plain_text = f"{salt}:{hmac_digest}:{self.config_name}:{timestamp}:{nonce}".encode('utf-8')
-        
-        # RSA加密
-        encrypted = self._encrypt_with_rsa(plain_text)
+        self.logger.info(f"Logging in user: {username}")
 
         try:
-            response = requests.post(self.config_service_url, data=encrypted, verify=True)
-            # ----- 修改点5：服务端现在统一返回200或401，不再区分404等 -----
-            if response.status_code == 200:
-                self.logger.info(f"✅ Got config '{self.config_name}':")
-                self.rsp = response
-                self._load_settings(model)
-                self.logger.info(f'load_config_settings success at model:{model}')
-            elif response.status_code == 401:
-                self.logger.info("❌ Authentication failed (wrong password, expired request, or file not found)")
-                raise ConfigServiceResponeseCodeError("❌ Authentication failed")
+            result = self.api_client.login(username, password)
+            private_key_path, public_key_path = self._get_key_paths_for_user(username)
+            if private_key_path.exists() and public_key_path.exists():
+                self.private_key_path = private_key_path
+                self.public_key_path = public_key_path
             else:
-                self.logger.info(f"⚠️  Server returned {response.status_code}")
-                raise ConfigServiceResponeseCodeError(f"⚠️  Server returned {response.status_code}")
-        except requests.exceptions.SSLError:
-            self.logger.info("❌ SSL certificate validation failed. Are you using a CA-signed certificate?")
-            raise
+                self.logger.warning(
+                    "RSA key files for user '%s' were not found in local default path. "
+                    "Without the correct private key, upload/download/update operations will fail. "
+                    "If you switched devices, please copy and configure your original private key file.",
+                    username
+                )
+            self.logger.info(f"✅ Login successful for user: {username}")
+            return result
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Login failed: {e}")
+
+    def logout(self) -> None:
+        """退出登录，清除本地Token"""
+        self.api_client.logout()
+        self.logger.info("Logged out successfully")
+
+    def deactivate_user(self, username: Optional[str] = None) -> Dict[str, Any]:
+        """
+        注销用户（逻辑删除，不物理删除）
+        """
+        if not self.is_authenticated():
+            raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
+
+        target_username = username or (self.get_user_info() or {}).get("username")
+        if not target_username:
+            raise ConfigServiceRuntimeError("Username is required to deactivate user")
+
+        try:
+            result = self.api_client.deactivate_user(target_username)
+            self.logger.info(f"✅ User deactivated successfully: {target_username}")
+            return result
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Deactivate user failed: {e}")
+
+    def is_authenticated(self) -> bool:
+        """
+        检查是否已登录
+
+        Returns:
+            是否已登录且Token有效
+        """
+        return self.token_manager.is_authenticated()
+
+    def get_user_info(self) -> Optional[Dict[str, Any]]:
+        """
+        获取当前用户信息
+
+        Returns:
+            包含user_id和username的字典，未登录返回None
+        """
+        return self.token_manager.get_user_info()
+
+    # ============ 加密/解密辅助方法 ============
+
+    def _encrypt_config_data(self, data: bytes) -> tuple:
+        """
+        加密配置数据。
+
+        1. 生成随机AES密钥
+        2. 使用AES加密数据
+        3. 使用RSA公钥加密AES密钥
+
+        Args:
+            data: 原始配置数据
+
+        Returns:
+            (加密内容base64, 加密的AES密钥base64)
+        """
+        # 加载公钥
+        if not self.public_key_path.exists():
+            raise ConfigServiceInitError(
+                f"Public key not found: {self.public_key_path}. "
+                "Please make sure the matching RSA key files are configured for this account."
+            )
+
+        public_key = RSACrypto.load_public_key(self.public_key_path.read_bytes())
+
+        # 生成AES密钥
+        aes_key = AESCrypto.generate_key()
+
+        # AES加密内容
+        encrypted_content = AESCrypto.encrypt(data, aes_key)
+
+        # RSA加密AES密钥
+        encrypted_aes_key = RSACrypto.encrypt(public_key, aes_key)
+
+        # 返回base64编码
+        return base64.b64encode(encrypted_content).decode(), base64.b64encode(encrypted_aes_key).decode()
+
+    def _decrypt_config_data(self, encrypted_content_b64: str,
+                              encrypted_aes_key_b64: str) -> bytes:
+        """
+        解密配置数据。
+
+        1. Base64解码
+        2. 使用RSA私钥解密AES密钥
+        3. 使用AES密钥解密内容
+
+        Args:
+            encrypted_content_b64: Base64编码的加密内容
+            encrypted_aes_key_b64: Base64编码的加密AES密钥
+
+        Returns:
+            解密后的原始数据
+        """
+        # 加载私钥
+        if not self.private_key_path.exists():
+            raise ConfigServiceInitError(
+                f"Private key not found: {self.private_key_path}. "
+                "Without the correct private key, encrypted configs cannot be decrypted. "
+                "If you switched devices, copy your original private key to this device."
+            )
+
+        private_key = RSACrypto.load_private_key(load_private_key(self.private_key_path))
+
+        # Base64解码
+        encrypted_content = base64.b64decode(encrypted_content_b64)
+        encrypted_aes_key = base64.b64decode(encrypted_aes_key_b64)
+
+        # 兼容两种格式：
+        # 1) 单层RSA加密AES密钥（旧数据）
+        # 2) 服务端二次分块RSA加密后的AES密钥（新数据）
+        try:
+            aes_key = RSACrypto.decrypt(private_key, encrypted_aes_key)
+            if len(aes_key) != AESCrypto.KEY_SIZE:
+                raise CryptoError("Unexpected AES key length after single RSA decrypt")
+        except Exception:
+            inner_encrypted_aes_key = RSACrypto.decrypt_chunked(private_key, encrypted_aes_key)
+            aes_key = RSACrypto.decrypt(private_key, inner_encrypted_aes_key)
+
+        # AES解密内容
+        plaintext = AESCrypto.decrypt(encrypted_content, aes_key)
+
+        return plaintext
+
+    # ============ 配置管理方法 ============
+
+    def upload_config(self, config_name: str, file_path: Union[str, Path],
+                      need_decrypt_response: bool = True) -> Dict[str, Any]:
+        """
+        上传配置文件。
+
+        文件会先在本地使用AES加密，然后上传到服务端。
+
+        Args:
+            config_name: 配置名称（将保存到服务端的名称）
+            file_path: 本地配置文件路径
+            need_decrypt_response: 是否需要解密服务端返回的数据（用于验证）
+
+        Returns:
+            上传结果
+
+        Raises:
+            ConfigServiceRuntimeError: 上传失败
+        """
+        if not self.is_authenticated():
+            raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
+
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise ConfigServiceRuntimeError(f"File not found: {file_path.resolve().absolute()}")
+
+        self.logger.info(f"Uploading config: {config_name} from {file_path}")
+
+        # 读取并加密文件内容
+        try:
+            data = file_path.read_bytes()
+            encrypted_content, encrypted_aes_key = self._encrypt_config_data(data)
+        except CryptoError as e:
+            raise ConfigServiceRuntimeError(f"Encryption failed: {e}")
+
+        # 上传到服务端
+        try:
+            result = self.api_client.upload_config(config_name, encrypted_content, encrypted_aes_key)
+            self.logger.info(f"✅ Config uploaded successfully: {config_name}")
+            return result
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Upload failed: {e}")
+
+    def list_configs(self) -> List[Dict[str, Any]]:
+        """
+        获取配置列表。
+
+        Returns:
+            配置列表，每个元素包含id、config_name、created_at、updated_at
+
+        Raises:
+            ConfigServiceRuntimeError: 获取失败
+        """
+        if not self.is_authenticated():
+            raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
+
+        try:
+            configs = self.api_client.list_configs()
+            self.logger.info(f"Retrieved {len(configs)} configs")
+            return configs
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Failed to list configs: {e}")
+
+    def get_config(self, config_name: str, save_path: Optional[Union[str, Path]] = None,
+                   load_to_env: Literal['set_temp_env', 'write_local_file', 'all', 'none'] = 'none',
+                   need_decrypt: bool = True) -> Optional[bytes]:
+        """
+        获取并下载配置文件。
+
+        自动解密服务端返回的加密数据，可选择保存到文件或加载到环境变量。
+
+        Args:
+            config_name: 配置名称
+            save_path: 保存路径，若为None则根据config_name生成
+            load_to_env: 是否加载到环境变量或文件：
+                - 'set_temp_env': 解析并设置到环境变量
+                - 'write_local_file': 写入本地文件（前缀received_）
+                - 'all': 同时设置环境变量和写入文件
+                - 'none': 不做任何处理，只返回解密后的数据
+            need_decrypt: 是否解密数据（若为False则返回加密数据）
+
+        Returns:
+            解密后的配置数据，未指定save_path且load_to_env为'none'时返回
+
+        Raises:
+            ConfigServiceRuntimeError: 获取失败
+        """
+        if not self.is_authenticated():
+            raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
+
+        self.logger.info(f"Getting config: {config_name}")
+
+        # 从服务端获取
+        try:
+            data = self.api_client.get_config(config_name)
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Failed to get config: {e}")
+
+        # 解密数据
+        if need_decrypt:
+            try:
+                decrypted_data = self._decrypt_config_data(
+                    data['encrypted_content'],
+                    data['encrypted_aes_key']
+                )
+            except CryptoError as e:
+                raise ConfigServiceRuntimeError(f"Decryption failed: {e}")
+        else:
+            decrypted_data = base64.b64decode(data['encrypted_content'])
+
+        self.rsp = data
+
+        # 处理解密后的数据
+        normalized_save_path = Path(save_path) if save_path else None
+        return self._load_settings(decrypted_data, config_name, normalized_save_path, load_to_env)
+
+    def _load_settings(self, data: bytes, config_name: str,
+                       save_path: Optional[Path],
+                       model: Literal['set_temp_env', 'write_local_file', 'all', 'none']) -> Optional[bytes]:
+        """
+        根据指定模式应用配置数据
+
+        Args:
+            data: 解密后的配置数据
+            config_name: 配置名称
+            save_path: 保存路径
+            model: 应用模式
+
+        Returns:
+            若model为'none'且指定了save_path，返回None；否则返回解密后的数据
+        """
+        suffix = Path(config_name).suffix.lower()
+
+        if model == 'none':
+            if save_path:
+                target_path = Path(save_path)
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_bytes(data)
+                self.logger.info(f"Saved to: {target_path}")
+            return None if save_path else data
+
+        # 设置环境变量
+        if model in ('set_temp_env', 'all'):
+            self._set_temp_env(data, suffix)
+
+        # 写入文件
+        if model in ('write_local_file', 'all'):
+            if save_path is None:
+                save_path = Path(f"received_{config_name}")
+            target_path = Path(save_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(data)
+            self.logger.info(f"Saved to: {target_path}")
+
+        return None if save_path else data
+
+    def _set_temp_env(self, data: bytes, suffix: str) -> None:
+        """设置环境变量"""
+        try:
+            if suffix == '.toml':
+                content = tomllib.loads(data.decode('utf-8'))
+                flatten_data = _flatten_toml(content)
+                for key, value in flatten_data.items():
+                    os.environ[key] = value
+            elif suffix == '.env':
+                from dotenv import dotenv_values
+                env_vars = dotenv_values(stream=io.StringIO(data.decode("utf-8")))
+                for key, value in env_vars.items():
+                    if value:
+                        os.environ[key] = value
+            else:
+                self.logger.warning(f"Unsupported file suffix for env loading: {suffix}")
         except Exception as e:
-            self.logger.info(f"❌ Request failed: {e}")
-            raise
+            self.logger.warning(f"Failed to set env vars: {e}")
+
+    def update_config(self, config_name: str, file_path: Union[str, Path]) -> Dict[str, Any]:
+        """
+        更新配置文件。
+
+        Args:
+            config_name: 配置名称
+            file_path: 本地配置文件路径
+
+        Returns:
+            更新结果
+
+        Raises:
+            ConfigServiceRuntimeError: 更新失败
+        """
+        if not self.is_authenticated():
+            raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
+
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise ConfigServiceRuntimeError(f"File not found: {file_path.resolve().absolute()}")
+
+        self.logger.info(f"Updating config: {config_name}")
+
+        # 读取并加密
+        try:
+            data = file_path.read_bytes()
+            encrypted_content, encrypted_aes_key = self._encrypt_config_data(data)
+        except CryptoError as e:
+            raise ConfigServiceRuntimeError(f"Encryption failed: {e}")
+
+        # 上传到服务端
+        try:
+            result = self.api_client.update_config(config_name, encrypted_content, encrypted_aes_key)
+            self.logger.info(f"✅ Config updated successfully: {config_name}")
+            return result
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Update failed: {e}")
+
+    def delete_config(self, config_name: str) -> Dict[str, Any]:
+        """
+        删除配置文件。
+
+        Args:
+            config_name: 配置名称
+
+        Returns:
+            删除结果
+
+        Raises:
+            ConfigServiceRuntimeError: 删除失败
+        """
+        if not self.is_authenticated():
+            raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
+
+        self.logger.info(f"Deleting config: {config_name}")
+
+        try:
+            result = self.api_client.delete_config(config_name)
+            self.logger.info(f"✅ Config deleted successfully: {config_name}")
+            return result
+        except APIError as e:
+            raise ConfigServiceRuntimeError(f"Delete failed: {e}")
+
+    # ============ 向后兼容方法 ============
+
+    def load_config_settings(self, model: Literal['write_local_file', 'set_temp_env', 'all'] = "set_temp_env") -> None:
+        """
+        向后兼容方法：从服务端获取配置并应用。
+
+        注意：此方法保留用于向后兼容。新代码请使用upload_config/get_config方法。
+
+        Args:
+            model: 应用模式（已被忽略，始终使用get_config获取）
+
+        Raises:
+            ConfigServiceRuntimeError: 获取失败
+        """
+        # 从rsp中获取config_name
+        config_name = getattr(self, 'config_name', 'config.env')
+
+        self.logger.warning(
+            "load_config_settings is deprecated. "
+            "Use get_config() with load_to_env parameter instead."
+        )
+
+        # 尝试从配置名获取
+        if self.rsp:
+            self.logger.info(f"Using response from previous request for: {config_name}")
+        else:
+            self.logger.info(f"Fetching config: {config_name}")
+            self.get_config(config_name, load_to_env=model)
 
 
-def _verify_env_setings(verify_dict: dict) -> None:
+def _verify_env_settings(verify_dict: dict) -> None:
     """
     验证当前环境变量是否与期望的键值对完全匹配。
 
@@ -422,7 +779,7 @@ def _verify_env_setings(verify_dict: dict) -> None:
         verify_dict: 期望的环境变量字典，键为变量名，值为期望值
 
     Raises:
-        Exception: 当任何环境变量值与期望不符或缺失时，汇总所有差异并抛出异常
+        Exception: 当任何环境变量值与期望不符或缺失时
     """
     err = []
     for key, value in verify_dict.items():
@@ -432,20 +789,12 @@ def _verify_env_setings(verify_dict: dict) -> None:
         raise Exception(f"verify env setings fail:{'\n'.join(err)}")
     print('verify_env_success!')
 
-if __name__ == "__main__":
-    # 示例：验证从配置服务获取的特定环境变量
-    verify_dict = {
-        "DB_HOST":"rm-7xv8ckj51yk3tvssryo.mysql.rds.aliyuncs.com",
-        "DB_PORT":'3306',
-        "DB_NAME":"object_backup_test_new",
-        "DB_USER":"ali_mysql",
-        "DB_PASSWORD":"Xc_3kyi1JG9dMSv6",
-        "BAIDU_PAN_TOKEN":"121.e0acb6c57fbfc46a2bb5d62212a7ed4b.YGkbJzF7HHuUtuwW7E976xf5Rg4uDk5jLmllSww.AhJzuA"
-    }
 
-    config_service = ConfigServiceClient()
-    try:
-        config_service.load_config_settings('all')
-        _verify_env_setings(verify_dict)
-    except Exception as e:
-        raise e
+# 导出
+__all__ = [
+    'ConfigServiceClient',
+    'ConfigServiceInitError',
+    'ConfigServiceRuntimeError',
+    'ConfigServiceResponseCodeError',
+    '_verify_env_settings'
+]
