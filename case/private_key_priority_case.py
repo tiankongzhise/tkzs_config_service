@@ -48,9 +48,10 @@ def main() -> None:
     print(f"[case3] private_key_path={client.private_key_path}")
 
     # 下面可继续上传/下载配置验证私钥是否生效
+    # v0.5.0: file_path 在前，config_name 在后
     sample_env = Path("./case/template.env")
     if sample_env.exists():
-        client.upload_config("priority_case_template.env", sample_env)
+        client.upload_config(sample_env, config_name="priority_case_template.env")
         print("upload finished")
 
 

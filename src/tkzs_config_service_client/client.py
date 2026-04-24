@@ -16,9 +16,9 @@
     # 登录
     client.login("my_username", "my_password")
 
-    # 上传配置（两种写法）
+    # 上传配置（两种写法，v0.5.0: file_path 在前，config_name 在后）
     client.upload_config("/path/to/mysql.env")  # config_name 自动取 mysql.env
-    client.upload_config("mysql.env", "/path/to/mysql.env")
+    client.upload_config("/path/to/mysql.env", config_name="mysql.env")
 
     # 获取配置列表
     configs = client.list_configs()
@@ -28,9 +28,9 @@
     client.get_config("mysql.env", load_to_env="none", save_dir="/tmp")  # 保存到 /tmp/mysql.env
     client.get_config("mysql.env", load_to_env="none", save_path="/tmp/mysql.env")  # 完整路径
 
-    # 更新配置（两种写法）
+    # 更新配置（两种写法，v0.5.0: file_path 在前，config_name 在后）
     client.update_config("/path/to/new_mysql.env")
-    client.update_config("mysql.env", "/path/to/new_mysql.env")
+    client.update_config("/path/to/new_mysql.env", config_name="mysql.env")
 
     # 删除配置
     client.delete_config("mysql.env")
