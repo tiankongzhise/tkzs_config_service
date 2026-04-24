@@ -1,3 +1,11 @@
+"""客户端 API 易用性示例（v0.5.0）
+
+v0.5.0 Breaking Changes:
+- upload_config(file_path, config_name=None): file_path 必填，config_name 可选
+- update_config(file_path, config_name=None): 同上
+- get_config(..., save_dir, save_path): save_dir 在前，save_path 在后但优先级更高
+"""
+
 import os
 from pathlib import Path
 
@@ -29,16 +37,25 @@ def main() -> None:
 
     client.login(USERNAME, PASSWORD)
 
-    # 单参数上传：配置名自动取文件名 template.env
+    # 单参数上传：file_path 必填，config_name 自动取 basename
     client.upload_config("./case/template.env")
 
-    # 单参数更新：配置名同样自动取文件名
+    # 双参数上传：显式指定 config_name
+    client.upload_config("./case/template.env", config_name="custom_name.env")
+
+    # 单参数更新：同上
     client.update_config("./case/template.env")
 
-    # 仅给 save_dir，保存路径自动推导为 ./case/downloads/template.env
+    # 仅给 save_dir（纯目录），保存路径自动推导为 ./case/downloads/template.env
+    # 注意：config_name 应为纯文件名，不含路径
     client.get_config("template.env", load_to_env="none", save_dir="./case/downloads")
 
-    # 自定义 set_temp_env 逻辑（默认仅支持 .env/.toml，此处示例扩展入口）
+    # load_to_env='none' 且未指定路径：直接返回解密数据
+    raw_data = client.get_config("template.env", load_to_env="none")
+    print(f"Raw data size: {len(raw_data) if raw_data else 0} bytes")
+
+    # 自定义 set_temp_env 逻辑
+    # 若回调抛出异常，会传播给调用方
     client.get_config(
         "template.env",
         load_to_env="set_temp_env",

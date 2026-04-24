@@ -75,33 +75,52 @@ uv run python ./case/private_key_priority_case.py
 3. 使用 RSA 公钥加密 AES 会话密钥，得到 `encrypted_aes_key`
 4. 下载时客户端用 RSA 私钥解开 `encrypted_aes_key`，再解密配置内容
 
-## 4) 上传/更新 API 易用性
+## 4) 上传/更新 API 易用性 (v0.5.0 Breaking Changes)
 
-`upload_config` / `update_config` 现支持两种调用：
+`upload_config` / `update_config` 形参顺序调整（v0.5.0）：
 
-1. 双参数：显式配置名 + 本地路径  
-   - `client.upload_config("app.env", "./path/app.env")`
-   - `client.update_config("app.env", "./path/app.env")`
-2. 单参数：仅传本地路径，`config_name` 自动取文件名（`Path(path).name`）  
-   - `client.upload_config("./path/app.env")`
-   - `client.update_config("./path/app.env")`
+- `file_path` 必填，位于第一位
+- `config_name` 可选，位于第二位
 
-## 5) `get_config` 参数语义
+两种调用方式：
 
-- 形参顺序调整为：`config_name, *, load_to_env, save_path, save_dir, temp_env_loader, need_decrypt`
-- `load_to_env="set_temp_env"` 时不做落盘（忽略 `save_path` / `save_dir`）
-- `save_path` 与 `save_dir` 同时存在时，`save_path` 优先
-- 仅传 `save_dir` 时，目标路径推导为 `Path(save_dir) / Path(config_name)`
+1. **单参数（推荐）**：仅传本地路径，`config_name` 自动取文件名（`Path(path).name`）
+   ```python
+   client.upload_config("./path/app.env")
+   client.update_config("./path/app.env")
+   ```
 
-自定义临时环境变量加载器：
+2. **双参数**：显式指定 `config_name`
+   ```python
+   client.upload_config("./path/app.env", config_name="custom_name.env")
+   client.update_config("./path/app.env", config_name="custom_name.env")
+   ```
 
-```python
-def my_loader(data: bytes, config_name: str) -> None:
-    ...
+## 5) `get_config` 参数语义 (v0.5.0 Breaking Changes)
 
-client.get_config(
-    "app.yaml",
-    load_to_env="set_temp_env",
-    temp_env_loader=my_loader,
-)
+形参顺序（v0.5.0）：
 ```
+config_name, *, load_to_env, save_dir, save_path, temp_env_loader, need_decrypt
+```
+
+- `load_to_env` 语义：
+  - `"none"`: 不写环境变量；未指定 `save_dir`/`save_path` 时直接返回解密数据
+  - `"set_temp_env"`: 仅写入环境变量，不落盘
+  - `"write_local_file"`: 仅落盘
+  - `"all"`: 先写环境变量，再落盘
+
+- `save_dir`: 保存目录（纯目录路径），与 `config_name` 组合为 `Path(save_dir) / config_name`
+  - 注意：`config_name` 应为纯文件名，不含路径
+- `save_path`: 完整文件路径，优先级高于 `save_dir`
+
+- 自定义 `temp_env_loader`（异常会传播）：
+  ```python
+  def my_loader(data: bytes, config_name: str) -> None:
+      ...
+
+  client.get_config(
+      "app.yaml",
+      load_to_env="set_temp_env",
+      temp_env_loader=my_loader,
+  )
+  ```

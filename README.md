@@ -9,6 +9,17 @@
 
 ## 新版本 v0.5.0 更新
 
+### ⚠️ 不兼容性更新 (Breaking Changes)
+
+本次更新对以下 API 进行了不兼容性修改：
+
+| 方法 | 变更 |
+|------|------|
+| `upload_config()` | 形参顺序调整：`file_path` 移至第一位，`config_name` 移至第二位 |
+| `update_config()` | 形参顺序调整：`file_path` 移至第一位，`config_name` 移至第二位 |
+| `get_config()` | 形参顺序调整：`save_dir` 移至 `save_path` 之前 |
+| `temp_env_loader` | 用户回调抛出的异常现在会传播出去（之前仅记录日志） |
+
 ### 主要特性
 - ✅ **用户注册/登录**：支持用户名密码注册，JWT Token认证
 - ✅ **配置管理**：上传、更新、删除、下载配置文件
@@ -99,8 +110,8 @@ client.register(
 client.login("my_username", "my_password", private_key_path="D:/secure_keys/my_private.pem")
 
 # 上传配置（两种写法）
-client.upload_config("mysql.env", "/path/to/mysql.env")
 client.upload_config("/path/to/mysql.env")  # config_name 自动取 mysql.env
+client.upload_config("mysql.env", "/path/to/mysql.env")
 
 # 查看配置列表
 configs = client.list_configs()
@@ -108,8 +119,8 @@ for cfg in configs:
     print(f"- {cfg['config_name']} (更新于 {cfg['updated_at']})")
 
 # 下载配置到文件（会自动创建目录）
-client.get_config("mysql.env", load_to_env="none", save_path="./tmp/mysql.env")
-client.get_config("mysql.env", load_to_env="none", save_dir="./tmp")  # 推导为 ./tmp/mysql.env
+client.get_config("mysql.env", load_to_env="none", save_dir="./tmp")  # 保存为 ./tmp/mysql.env
+client.get_config("mysql.env", load_to_env="none", save_path="./tmp/mysql.env")  # 完整路径
 
 # 下载并加载到环境变量
 client.get_config("app.toml", load_to_env="set_temp_env")
@@ -122,8 +133,8 @@ def my_temp_env_loader(data: bytes, config_name: str) -> None:
 client.get_config("app.yaml", load_to_env="set_temp_env", temp_env_loader=my_temp_env_loader)
 
 # 更新配置（两种写法）
-client.update_config("mysql.env", "/path/to/new_mysql.env")
 client.update_config("/path/to/new_mysql.env")
+client.update_config("mysql.env", "/path/to/new_mysql.env")
 
 # 删除配置
 client.delete_config("old_config.env")
