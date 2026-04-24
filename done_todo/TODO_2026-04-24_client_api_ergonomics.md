@@ -16,7 +16,7 @@
 ### 2. `upload_config` / `update_config` 仅提供本地路径
 
 - [x] 支持单参数调用：`upload_config(config_path)` / `update_config(config_path)`，其中 `config_name` 自动取 `Path(config_path).name`（与服务端存储名一致）。
-- [x] 保留双参数形式：`upload_config(config_name, file_path)` / `update_config(config_name, file_path)`。
+- [x] 保留双参数形式：`upload_config(file_path, config_name=...)` / `update_config(file_path, config_name=...)`。
 - [x] 文档与示例说明两种调用方式。
 
 ### 3. `get_config` 形参顺序与语义

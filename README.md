@@ -111,7 +111,7 @@ client.login("my_username", "my_password", private_key_path="D:/secure_keys/my_p
 
 # 上传配置（两种写法）
 client.upload_config("/path/to/mysql.env")  # config_name 自动取 mysql.env
-client.upload_config("mysql.env", "/path/to/mysql.env")
+client.upload_config("/path/to/mysql.env", config_name="mysql.env")
 
 # 查看配置列表
 configs = client.list_configs()
@@ -134,7 +134,7 @@ client.get_config("app.yaml", load_to_env="set_temp_env", temp_env_loader=my_tem
 
 # 更新配置（两种写法）
 client.update_config("/path/to/new_mysql.env")
-client.update_config("mysql.env", "/path/to/new_mysql.env")
+client.update_config("/path/to/new_mysql.env", config_name="mysql.env")
 
 # 删除配置
 client.delete_config("old_config.env")
