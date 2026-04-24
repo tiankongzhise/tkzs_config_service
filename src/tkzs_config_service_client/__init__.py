@@ -21,8 +21,12 @@ from .api import APIError, APIClient
 from .auth import TokenManager, AuthError
 from .crypto import RSACrypto, AESCrypto, CryptoError
 from .config import ClientConfig, DEFAULT_CLIENT_CONFIG, configure_client, reset_client_config
+from importlib.metadata import version, PackageNotFoundError
 
-__version__ = "0.5.1"
+try:
+    __version__ = version("tkzs-config-service-client")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"  # 降级方案，用于未安装时的纯开发环境
 
 __all__ = [
     # 主客户端
