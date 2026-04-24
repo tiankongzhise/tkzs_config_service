@@ -162,6 +162,9 @@ class ConfigServiceClient:
         self._class_private_key_dir_override: Optional[Path] = (
             Path(private_key_dir) if private_key_dir is not None else None
         )
+        self._class_public_key_path_override: Optional[Path] = (
+            Path(public_key_path) if public_key_path is not None else None
+        )
 
         # 密钥路径：构造函数参数 > 全局配置 > 默认值
         if private_key_path is not None:
@@ -182,6 +185,7 @@ class ConfigServiceClient:
             self.public_key_path = DEFAULT_CLIENT_CONFIG.public_key_path_override
         else:
             self.public_key_path = DEFAULT_CLIENT_CONFIG.default_public_key_path
+        self._default_public_key_path = DEFAULT_CLIENT_CONFIG.default_public_key_path
 
         # 初始化组件
         self.token_manager = TokenManager(token_dir)
@@ -202,6 +206,14 @@ class ConfigServiceClient:
             DEFAULT_CLIENT_CONFIG.private_key_path_for_user(normalized),
             DEFAULT_CLIENT_CONFIG.public_key_path_for_user(normalized),
         )
+
+    @staticmethod
+    def _infer_public_key_path_from_private(private_key_path: Path) -> Optional[Path]:
+        suffix = DEFAULT_CLIENT_CONFIG.private_key_suffix
+        if private_key_path.name.endswith(suffix):
+            public_name = private_key_path.name[: -len(suffix)] + DEFAULT_CLIENT_CONFIG.public_key_suffix
+            return private_key_path.parent / public_name
+        return None
 
     def _resolve_login_public_key(
             self,
@@ -493,11 +505,23 @@ class ConfigServiceClient:
             else:
                 resolved_private_key_path, _ = self._get_key_paths_for_user(username)
 
-            # 公钥路径：优先使用类属性，否则按用户名推导
-            if self.public_key_path is not None:
+            # 公钥路径优先级（从高到低）：
+            # 1) 显式类属性（构造参数 public_key_path 或运行时手动赋值非默认路径）
+            # 2) 全局配置 configure_client(public_key_path)
+            # 3) 由最终私钥路径推导同级公钥路径（避免私钥/公钥目录错配）
+            # 4) 按用户名默认推导
+            if self._class_public_key_path_override is not None:
+                public_key_path = self._class_public_key_path_override
+            elif self.public_key_path is not None and self.public_key_path != self._default_public_key_path:
                 public_key_path = self.public_key_path
+            elif DEFAULT_CLIENT_CONFIG.public_key_path_override is not None:
+                public_key_path = DEFAULT_CLIENT_CONFIG.public_key_path_override
             else:
-                _, public_key_path = self._get_key_paths_for_user(username)
+                inferred_public_key_path = self._infer_public_key_path_from_private(resolved_private_key_path)
+                if inferred_public_key_path is not None:
+                    public_key_path = inferred_public_key_path
+                else:
+                    _, public_key_path = self._get_key_paths_for_user(username)
 
             login_public_key_pem = self._resolve_login_public_key(
                 username,

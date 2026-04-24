@@ -286,6 +286,44 @@ def test_login_inferrs_class_private_key_path_from_class_private_key_dir(tmp_pat
     reset_client_config()
 
 
+def test_login_uses_public_key_sibling_of_resolved_private_key(tmp_path: Path):
+    """
+    回归测试：当私钥来自自定义目录时，若未显式指定公钥路径，
+    login 应优先使用该私钥同级推导的公钥路径，而不是默认 user_public_key.pem。
+    """
+    reset_client_config()
+    username = "hbc_config_center_admin"
+    custom_dir = tmp_path / "onedrive_ssl"
+    default_ssl_dir = tmp_path / "default_ssl"
+
+    custom_private = custom_dir / f"{username}_private_key.pem"
+    custom_public = custom_dir / f"{username}_public_key.pem"
+    default_public = default_ssl_dir / "user_public_key.pem"
+
+    # 自定义目录放置匹配的私钥/公钥；默认目录放置不匹配公钥用于制造潜在冲突
+    _prepare_keypair(custom_private, custom_public)
+    _prepare_private_key(default_public)
+
+    configure_client(ssl_dir=default_ssl_dir)
+    client = ConfigServiceClient(
+        config_service_url=TEST_DEV.service_url,
+        private_key_dir=custom_dir,
+    )
+
+    client.api_client.login = lambda *_args, **_kwargs: {
+        "access_token": "fake-token",
+        "expires_in": 3600,
+        "user_id": 1,
+        "username": username,
+    }
+
+    # 旧逻辑会拿 default_public 参与比对并失败；修复后应成功
+    client.login(username, "password123")
+    assert client.private_key_path == custom_private
+    assert client.public_key_path == custom_public
+    reset_client_config()
+
+
 def test_init_respects_global_config_when_no_constructor_arg(tmp_path: Path):
     """
     验证构造函数不传参数时，正确使用全局配置。
