@@ -124,6 +124,7 @@ class ConfigServiceClient:
     def __init__(
             self,
             config_service_url: Optional[str] = None,
+            private_key_dir: Optional[Path] = None,
             private_key_path: Optional[Path] = None,
             public_key_path: Optional[Path] = None,
             token_dir: Optional[Path] = None,
@@ -137,6 +138,7 @@ class ConfigServiceClient:
 
         Args:
             config_service_url: 配置服务的URL。若为None，则从环境变量CONFIG_SERVICE_URL读取
+            private_key_dir: 用户RSA私钥目录（按用户名推导私钥文件名）。
             private_key_path: 用户RSA私钥文件路径。
             public_key_path: 用户RSA公钥文件路径。
             token_dir: Token存储目录，默认为 ~/.config/tkzs_service
@@ -153,6 +155,14 @@ class ConfigServiceClient:
         # 获取服务URL
         self.config_service_url: str = DEFAULT_CLIENT_CONFIG.get_service_url(config_service_url)
 
+        # 记录构造函数显式传入值（用于 login 优先级判断）
+        self._class_private_key_path_override: Optional[Path] = (
+            Path(private_key_path) if private_key_path is not None else None
+        )
+        self._class_private_key_dir_override: Optional[Path] = (
+            Path(private_key_dir) if private_key_dir is not None else None
+        )
+
         # 密钥路径：构造函数参数 > 全局配置 > 默认值
         if private_key_path is not None:
             self.private_key_path = Path(private_key_path)
@@ -160,6 +170,11 @@ class ConfigServiceClient:
             self.private_key_path = DEFAULT_CLIENT_CONFIG.private_key_path_override
         else:
             self.private_key_path = DEFAULT_CLIENT_CONFIG.default_private_key_path
+        self.private_key_dir = (
+            Path(private_key_dir)
+            if private_key_dir is not None
+            else DEFAULT_CLIENT_CONFIG.private_key_dir_override
+        )
 
         if public_key_path is not None:
             self.public_key_path = Path(public_key_path)
@@ -453,7 +468,7 @@ class ConfigServiceClient:
 
             # 私钥路径优先级（跨层，从高到低）：
             # 1) login参数（同层: private_key_path > private_key_dir）
-            # 2) 类属性（self.private_key_path，即构造时传入的值）
+            # 2) 类属性（构造函数参数，同层: private_key_path > private_key_dir）
             # 3) configure_client全局配置（同层: private_key_path > private_key_dir）
             # 4) 默认按用户名推导路径
             if private_key_path is not None:
@@ -462,9 +477,13 @@ class ConfigServiceClient:
                 resolved_private_key_path = Path(private_key_dir) / (
                         f"{normalized_username}{DEFAULT_CLIENT_CONFIG.private_key_suffix}"
                 )
-            elif self.private_key_path is not None:
+            elif self._class_private_key_path_override is not None:
                 # 类属性优先级高于全局配置
-                resolved_private_key_path = self.private_key_path
+                resolved_private_key_path = self._class_private_key_path_override
+            elif self._class_private_key_dir_override is not None:
+                resolved_private_key_path = self._class_private_key_dir_override / (
+                        f"{normalized_username}{DEFAULT_CLIENT_CONFIG.private_key_suffix}"
+                )
             elif DEFAULT_CLIENT_CONFIG.private_key_path_override is not None:
                 resolved_private_key_path = DEFAULT_CLIENT_CONFIG.private_key_path_override
             elif DEFAULT_CLIENT_CONFIG.private_key_dir_override is not None:

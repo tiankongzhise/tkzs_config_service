@@ -248,6 +248,44 @@ def test_login_uses_class_attribute_over_global_config(tmp_path: Path):
     reset_client_config()
 
 
+def test_login_inferrs_class_private_key_path_from_class_private_key_dir(tmp_path: Path):
+    """
+    验证当构造函数仅设置 private_key_dir（未设置 private_key_path）时，
+    login 会推导类级 private_key_path，且其优先级等同于类级 private_key_path。
+    """
+    reset_client_config()
+    username = "dir_priority_user"
+    class_dir = tmp_path / "class_keys"
+    global_dir = tmp_path / "global_keys"
+
+    class_private = class_dir / f"{username}_private_key.pem"
+    class_public = class_dir / f"{username}_public_key.pem"
+    global_private = global_dir / f"{username}_private_key.pem"
+
+    _prepare_keypair(class_private, class_public)
+    _prepare_private_key(global_private)
+
+    # 全局配置设置为另一套私钥目录；期望被类级 private_key_dir 覆盖
+    configure_client(private_key_dir=global_dir)
+
+    client = ConfigServiceClient(
+        config_service_url=TEST_DEV.service_url,
+        private_key_dir=class_dir,
+    )
+    client.public_key_path = class_public
+    client.api_client.login = lambda *_args, **_kwargs: {
+        "access_token": "fake-token",
+        "expires_in": 3600,
+        "user_id": 1,
+        "username": username,
+    }
+
+    client.login(username, "password123")
+
+    assert client.private_key_path == class_private
+    reset_client_config()
+
+
 def test_init_respects_global_config_when_no_constructor_arg(tmp_path: Path):
     """
     验证构造函数不传参数时，正确使用全局配置。
