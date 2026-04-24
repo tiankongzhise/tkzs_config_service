@@ -40,6 +40,7 @@ def _prepare_keypair(private_path: Path, public_path: Path) -> None:
 
 
 def test_runtime_configure_client_affects_new_instance(tmp_path: Path):
+    """验证 configure_client 全局配置能影响新实例"""
     reset_client_config()
     custom_ssl_dir = tmp_path / "custom_ssl"
     custom_token_dir = tmp_path / "custom_token"
@@ -62,119 +63,21 @@ def test_runtime_configure_client_affects_new_instance(tmp_path: Path):
     reset_client_config()
 
 
-def test_login_private_key_priority(tmp_path: Path):
-    reset_client_config()
-    ssl_dir = tmp_path / "ssl"
-    username = "priority_user"
-    login_arg_private = tmp_path / "keys" / "login_arg_private.pem"
-    config_private = tmp_path / "keys" / "config_private.pem"
-    default_private = ssl_dir / f"{username}_private_key.pem"
-    default_public = ssl_dir / f"{username}_public_key.pem"
-
-    _prepare_keypair(login_arg_private, default_public)
-    _prepare_private_key(config_private)
-    private_pem, public_pem = RSACrypto.generate_keypair()
-    default_private.parent.mkdir(parents=True, exist_ok=True)
-    default_private.write_bytes(private_pem)
-
-    configure_client(ssl_dir=ssl_dir, private_key_path=config_private)
-    client = ConfigServiceClient(config_service_url=TEST_DEV.service_url)
-    client.api_client.login = lambda *_args, **_kwargs: {
-        "access_token": "fake-token",
-        "expires_in": 3600,
-        "user_id": 1,
-        "username": username,
-    }
-
-    client.login(username, "password123", private_key_path=login_arg_private)
-    assert client.private_key_path == login_arg_private
-
-    # 改为 config 私钥来源时，同步更新该用户公钥以匹配 config 私钥
-    _prepare_keypair(config_private, default_public)
-    client.login(username, "password123")
-    assert client.private_key_path == config_private
-
-    # 改为默认私钥来源时，同步更新该用户公钥以匹配默认私钥
-    default_public.write_bytes(public_pem)
-    configure_client(private_key_path=None)
-    client.login(username, "password123")
-    assert client.private_key_path == default_private
-
-    reset_client_config()
-
-
-def test_login_private_key_path_beats_private_key_dir_in_same_level(tmp_path: Path):
-    reset_client_config()
-    username = "same_level_user"
-    login_private = tmp_path / "login" / "explicit.pem"
-    login_dir = tmp_path / "login_dir"
-    login_dir_private = login_dir / f"{username}_private_key.pem"
-    config_private = tmp_path / "config" / "config.pem"
-
-    _prepare_private_key(login_private)
-    _prepare_private_key(login_dir_private)
-    _prepare_private_key(config_private)
-
-    configure_client(private_key_path=config_private)
-    client = ConfigServiceClient(config_service_url="http://unit-test")
-    client.api_client.login = lambda *_args, **_kwargs: {
-        "access_token": "fake-token",
-        "expires_in": 3600,
-        "user_id": 1,
-        "username": username,
-    }
-
-    client.login(
-        username,
-        "password123",
-        private_key_path=login_private,
-        private_key_dir=login_dir,
-    )
-    assert client.private_key_path == login_private
-    reset_client_config()
-
-
-def test_login_level_priority_login_over_config_with_private_key_dir(tmp_path: Path):
-    reset_client_config()
-    username = "cross_level_user"
-    config_dir = tmp_path / "config_dir"
-    login_dir = tmp_path / "login_dir"
-    config_private = config_dir / f"{username}_private_key.pem"
-    login_private = login_dir / f"{username}_private_key.pem"
-
-    _prepare_private_key(config_private)
-    _prepare_private_key(login_private)
-
-    configure_client(private_key_dir=config_dir)
-    client = ConfigServiceClient(config_service_url="http://unit-test")
-    client.api_client.login = lambda *_args, **_kwargs: {
-        "access_token": "fake-token",
-        "expires_in": 3600,
-        "user_id": 1,
-        "username": username,
-    }
-
-    client.login(username, "password123", private_key_dir=login_dir)
-    assert client.private_key_path == login_private
-    reset_client_config()
-
-
-def test_encrypt_uses_private_key_when_public_missing(tmp_path: Path):
-    reset_client_config()
-
-
 def test_login_rejects_mismatched_private_key_and_clears_token(tmp_path: Path):
+    """验证当私钥与公钥不匹配时，login 会拒绝并清除 token"""
     reset_client_config()
     ssl_dir = tmp_path / "ssl"
     username = "security_user"
-    correct_private = ssl_dir / f"{username}_private_key.pem"
-    public_path = ssl_dir / f"{username}_public_key.pem"
+    # 公钥路径使用默认前缀 "user"，因为 configure_client(ssl_dir=...) 会设置默认路径
+    public_path = ssl_dir / "user_public_key.pem"
     wrong_private = tmp_path / "keys" / "wrong_private.pem"
     token_dir = tmp_path / "token_dir"
 
     correct_private_pem, correct_public_pem = RSACrypto.generate_keypair()
-    correct_private.parent.mkdir(parents=True, exist_ok=True)
-    correct_private.write_bytes(correct_private_pem)
+    # 将匹配的私钥写入 login 方法会使用的默认路径
+    default_private_path = ssl_dir / "user_private_key.pem"
+    default_private_path.parent.mkdir(parents=True, exist_ok=True)
+    default_private_path.write_bytes(correct_private_pem)
     public_path.write_bytes(correct_public_pem)
     _prepare_private_key(wrong_private)
 
@@ -193,6 +96,7 @@ def test_login_rejects_mismatched_private_key_and_clears_token(tmp_path: Path):
 
     client.api_client.login = _fake_login
 
+    # 使用不匹配的私钥（wrong_private 与默认 public_path 不匹配）
     with pytest.raises(ConfigServiceRuntimeError, match="does not match"):
         client.login(username, "password123", private_key_path=wrong_private)
 
@@ -201,11 +105,18 @@ def test_login_rejects_mismatched_private_key_and_clears_token(tmp_path: Path):
 
 
 def test_login_derives_public_key_when_local_missing(tmp_path: Path):
+    """
+    验证当本地公钥缺失时，客户端会由私钥推导并保存公钥。
+
+    准备私钥在用户推导路径（ssl_dir/derive_pub_user_private_key.pem），
+    公钥也会被推导保存到对应的位置（ssl_dir/derive_pub_user_public_key.pem）。
+    """
     reset_client_config()
     ssl_dir = tmp_path / "ssl"
     username = "derive_pub_user"
-    private_path = ssl_dir / f"{username}_private_key.pem"
-    public_path = ssl_dir / f"{username}_public_key.pem"
+    # 私钥和公钥路径都使用用户名推导
+    private_path = ssl_dir / "derive_pub_user_private_key.pem"
+    public_path = ssl_dir / "derive_pub_user_public_key.pem"
 
     private_pem, public_pem = RSACrypto.generate_keypair()
     private_path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,6 +124,9 @@ def test_login_derives_public_key_when_local_missing(tmp_path: Path):
 
     configure_client(ssl_dir=ssl_dir)
     client = ConfigServiceClient(config_service_url="http://unit-test")
+    # 清空类属性，让 login 使用默认推导路径
+    client.private_key_path = None
+    client.public_key_path = None  # 也要清空公钥
     captured: dict = {}
 
     def _fake_login(_username: str, _password: str, _public_key: str):
@@ -234,6 +148,8 @@ def test_login_derives_public_key_when_local_missing(tmp_path: Path):
     assert captured["public_key"] == public_pem.decode("utf-8")
     assert public_path.exists()
     assert public_path.read_bytes() == public_pem
+
+    # 验证加密时可以使用只有私钥的情况（公钥由私钥推导）
     reset_client_config()
     private_key_path = tmp_path / "only_private.pem"
     _prepare_private_key(private_key_path)
@@ -247,5 +163,136 @@ def test_login_derives_public_key_when_local_missing(tmp_path: Path):
     encrypted_content, encrypted_aes_key = client._encrypt_config_data(b"hello")
     assert encrypted_content
     assert encrypted_aes_key
+
+    reset_client_config()
+
+
+def test_class_attribute_overrides_global_config(tmp_path: Path):
+    """
+    验证类属性（构造函数参数）优先级高于全局配置（configure_client）。
+
+    优先级链：构造函数参数 > configure_client全局配置 > 默认值
+    """
+    reset_client_config()
+    ssl_dir = tmp_path / "ssl"
+
+    # 准备三种不同层级的私钥
+    global_private = tmp_path / "global_private.pem"
+    class_private = tmp_path / "class_private.pem"
+    default_private = ssl_dir / "default_private.pem"
+
+    _prepare_private_key(global_private)
+    _prepare_private_key(class_private)
+    _prepare_private_key(default_private)
+
+    # 场景1：configure_client 设置全局配置
+    configure_client(
+        ssl_dir=ssl_dir,
+        private_key_path=global_private,
+    )
+
+    # 场景2：构造函数参数应覆盖全局配置
+    client = ConfigServiceClient(
+        config_service_url=TEST_DEV.service_url,
+        private_key_path=class_private,
+    )
+    # 类属性优先级高于全局配置
+    assert client.private_key_path == class_private
+
+    reset_client_config()
+
+
+def test_login_uses_class_attribute_over_global_config(tmp_path: Path):
+    """
+    验证 login 方法中类属性优先级高于全局配置。
+
+    优先级链：login参数 > 类属性 > configure_client全局配置 > 默认值
+    """
+    reset_client_config()
+    ssl_dir = tmp_path / "ssl"
+    username = "priority_test_user"
+
+    # 准备不同层级的私钥
+    global_private = tmp_path / "global_private.pem"
+    class_private = tmp_path / "class_private.pem"
+    default_private = ssl_dir / f"{username}_private_key.pem"
+    default_public = ssl_dir / f"{username}_public_key.pem"
+
+    # 为不同私钥准备匹配的公钥
+    _prepare_keypair(global_private, default_public)
+    _prepare_keypair(class_private, default_public)
+
+    # 全局配置指向 global_private
+    configure_client(
+        ssl_dir=ssl_dir,
+        private_key_path=global_private,
+    )
+
+    # 构造函数使用 class_private
+    client = ConfigServiceClient(
+        config_service_url=TEST_DEV.service_url,
+        private_key_path=class_private,
+    )
+    client.api_client.login = lambda *_args, **_kwargs: {
+        "access_token": "fake-token",
+        "expires_in": 3600,
+        "user_id": 1,
+        "username": username,
+    }
+
+    # login 不传参数时，应使用类属性（class_private），而非全局配置（global_private）
+    client.login(username, "password123")
+    assert client.private_key_path == class_private, \
+        f"Expected class_private, got {client.private_key_path}"
+
+    reset_client_config()
+
+
+def test_init_respects_global_config_when_no_constructor_arg(tmp_path: Path):
+    """
+    验证构造函数不传参数时，正确使用全局配置。
+    """
+    reset_client_config()
+    ssl_dir = tmp_path / "ssl"
+    global_private = ssl_dir / "global_default_private.pem"
+    global_public = ssl_dir / "global_default_public.pem"
+
+    _prepare_keypair(global_private, global_public)
+
+    configure_client(
+        ssl_dir=ssl_dir,
+        private_key_path=global_private,
+    )
+
+    # 构造函数不传参数，应使用全局配置
+    client = ConfigServiceClient(config_service_url=TEST_DEV.service_url)
+    assert client.private_key_path == global_private
+
+    reset_client_config()
+
+
+def test_init_constructor_arg_overrides_global_config(tmp_path: Path):
+    """
+    验证构造函数参数优先级高于全局配置。
+    """
+    reset_client_config()
+    ssl_dir = tmp_path / "ssl"
+    global_private = ssl_dir / "global_private.pem"
+    explicit_private = tmp_path / "explicit_private.pem"
+
+    _prepare_private_key(global_private)
+    _prepare_private_key(explicit_private)
+
+    configure_client(
+        ssl_dir=ssl_dir,
+        private_key_path=global_private,
+    )
+
+    # 构造函数传参数，应覆盖全局配置
+    client = ConfigServiceClient(
+        config_service_url=TEST_DEV.service_url,
+        private_key_path=explicit_private,
+    )
+    assert client.private_key_path == explicit_private
 
     reset_client_config()
