@@ -80,7 +80,14 @@ client = ConfigServiceClient(
 # 方式1：不提供密钥，客户端自动生成RSA密钥对
 client.register("my_username", "my_password")
 
-# 方式2：使用自备RSA公私钥（必须成对提供；会校验格式和匹配关系）
+# 方式2：仅提供自备RSA私钥（公钥由私钥推导）
+client.register(
+    "my_username",
+    "my_password",
+    user_private_key_path="D:/secure_keys/my_username_private.pem",
+)
+
+# 方式3：使用自备RSA公私钥（会校验格式和匹配关系）
 client.register(
     "my_username",
     "my_password",
@@ -91,8 +98,9 @@ client.register(
 # 登录（支持本次登录显式指定私钥路径，优先级最高）
 client.login("my_username", "my_password", private_key_path="D:/secure_keys/my_private.pem")
 
-# 上传配置
+# 上传配置（两种写法）
 client.upload_config("mysql.env", "/path/to/mysql.env")
+client.upload_config("/path/to/mysql.env")  # config_name 自动取 mysql.env
 
 # 查看配置列表
 configs = client.list_configs()
@@ -100,13 +108,22 @@ for cfg in configs:
     print(f"- {cfg['config_name']} (更新于 {cfg['updated_at']})")
 
 # 下载配置到文件（会自动创建目录）
-client.get_config("mysql.env", save_path="./tmp/mysql.env")
+client.get_config("mysql.env", load_to_env="none", save_path="./tmp/mysql.env")
+client.get_config("mysql.env", load_to_env="none", save_dir="./tmp")  # 推导为 ./tmp/mysql.env
 
 # 下载并加载到环境变量
 client.get_config("app.toml", load_to_env="set_temp_env")
 
-# 更新配置
+# 下载并自定义写环境变量逻辑（例如支持 yaml/json）
+def my_temp_env_loader(data: bytes, config_name: str) -> None:
+    # 用户自定义解析逻辑
+    pass
+
+client.get_config("app.yaml", load_to_env="set_temp_env", temp_env_loader=my_temp_env_loader)
+
+# 更新配置（两种写法）
 client.update_config("mysql.env", "/path/to/new_mysql.env")
+client.update_config("/path/to/new_mysql.env")
 
 # 删除配置
 client.delete_config("old_config.env")
@@ -123,6 +140,7 @@ client.logout()
 - 基础流程示例：`case/simple_case.py`
 - 注销重注册示例：`case/deactivate_re_register_case.py`
 - 私钥优先级示例：`case/private_key_priority_case.py`
+- API 易用性示例：`case/client_api_ergonomics_case.py`
 
 运行示例：
 
@@ -291,7 +309,8 @@ CREATE TABLE configs (
   - `~/.ssl/{username}_private_key.pem`
   - `~/.ssl/{username}_public_key.pem`
 - 若注册时未提供RSA文件，客户端会自动生成并提示私钥保存位置，请务必离线备份。
-- 若注册时提供自备RSA文件，必须同时提供公钥和私钥，客户端会校验PEM格式并校验公私钥是否匹配。
+- 若注册时仅提供私钥，客户端会自动推导公钥并完成注册。
+- 若注册时同时提供公私钥，客户端会校验PEM格式并校验公私钥是否匹配。
 - 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密与登录校验。
 - 若仅有账号密码但私钥缺失，登录会被拒绝（无法构造/验证登录公钥）。
 - 若私钥与该用户公钥不匹配，登录会被拒绝。

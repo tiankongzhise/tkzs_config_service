@@ -14,6 +14,7 @@ from .client import (
     ConfigServiceInitError,
     ConfigServiceRuntimeError,
     ConfigServiceResponseCodeError,
+    TempEnvLoader,
     _verify_env_settings
 )
 from .api import APIError, APIClient
@@ -21,7 +22,7 @@ from .auth import TokenManager, AuthError
 from .crypto import RSACrypto, AESCrypto, CryptoError
 from .config import ClientConfig, DEFAULT_CLIENT_CONFIG, configure_client, reset_client_config
 
-__version__ = "0.3.0"
+__version__ = "0.5.1"
 
 __all__ = [
     # 主客户端
@@ -29,6 +30,7 @@ __all__ = [
     'ConfigServiceInitError',
     'ConfigServiceRuntimeError',
     'ConfigServiceResponseCodeError',
+    'TempEnvLoader',
     '_verify_env_settings',
 
     # API

@@ -74,3 +74,34 @@ uv run python ./case/private_key_priority_case.py
 2. 使用 AES 加密配置内容
 3. 使用 RSA 公钥加密 AES 会话密钥，得到 `encrypted_aes_key`
 4. 下载时客户端用 RSA 私钥解开 `encrypted_aes_key`，再解密配置内容
+
+## 4) 上传/更新 API 易用性
+
+`upload_config` / `update_config` 现支持两种调用：
+
+1. 双参数：显式配置名 + 本地路径  
+   - `client.upload_config("app.env", "./path/app.env")`
+   - `client.update_config("app.env", "./path/app.env")`
+2. 单参数：仅传本地路径，`config_name` 自动取文件名（`Path(path).name`）  
+   - `client.upload_config("./path/app.env")`
+   - `client.update_config("./path/app.env")`
+
+## 5) `get_config` 参数语义
+
+- 形参顺序调整为：`config_name, *, load_to_env, save_path, save_dir, temp_env_loader, need_decrypt`
+- `load_to_env="set_temp_env"` 时不做落盘（忽略 `save_path` / `save_dir`）
+- `save_path` 与 `save_dir` 同时存在时，`save_path` 优先
+- 仅传 `save_dir` 时，目标路径推导为 `Path(save_dir) / Path(config_name)`
+
+自定义临时环境变量加载器：
+
+```python
+def my_loader(data: bytes, config_name: str) -> None:
+    ...
+
+client.get_config(
+    "app.yaml",
+    load_to_env="set_temp_env",
+    temp_env_loader=my_loader,
+)
+```

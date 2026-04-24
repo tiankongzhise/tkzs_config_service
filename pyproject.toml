@@ -4,7 +4,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 [project]
 name = "tkzs-config-service-client"
-version = "0.5.0"
+version = "0.5.1"
 description = "tkzs config service client,get config or env from Configuration Center"
 readme = "README.md"
 requires-python = ">=3.14"

@@ -16,18 +16,21 @@
     # 登录
     client.login("my_username", "my_password")
 
-    # 上传配置
+    # 上传配置（可写 config_name + 路径，或只写本地文件路径，名称取 basename）
     client.upload_config("mysql.env", "/path/to/mysql.env")
+    client.upload_config("/path/to/mysql.env")
 
     # 获取配置列表
     configs = client.list_configs()
     print(configs)
 
-    # 下载配置
-    client.get_config("mysql.env", save_path="/tmp/mysql.env")
+    # 下载配置（load_to_env 在 save_path 之前；仅关键字参数）
+    client.get_config("mysql.env", load_to_env="none", save_path="/tmp/mysql.env")
+    client.get_config("mysql.env", load_to_env="none", save_dir="/tmp")
 
     # 更新配置
     client.update_config("mysql.env", "/path/to/new_mysql.env")
+    client.update_config("/path/to/new_mysql.env")
 
     # 删除配置
     client.delete_config("mysql.env")
@@ -42,7 +45,9 @@ import logging
 import os
 import tomllib
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
+
+TempEnvLoader = Callable[[bytes, str], None]
 
 from dotenv import load_dotenv
 from cryptography.hazmat.primitives import serialization
@@ -256,10 +261,10 @@ class ConfigServiceClient:
             except CryptoError as e:
                 raise ConfigServiceInitError(f"Failed to generate RSA keypair: {e}")
 
-        # 用户自备密钥时，要求公私钥成对提供，避免出现只能“部分校验”的歧义状态
-        if user_private_key_path is None or user_public_key_path is None:
+        if user_private_key_path is None and user_public_key_path is not None:
             raise ConfigServiceInitError(
-                "Custom RSA files must provide both user_private_key_path and user_public_key_path"
+                "Register requires user_private_key_path (public key alone is not sufficient "
+                "to decrypt configs on this client)."
             )
 
         private_path = Path(user_private_key_path)
@@ -282,6 +287,9 @@ class ConfigServiceClient:
             raise ConfigServiceInitError(
                 f"Invalid RSA private key format in {private_path}: {e}"
             )
+
+        if user_public_key_path is None:
+            return normalized_private_pem, derived_public_pem, "provided"
 
         public_path = Path(user_public_key_path)
         if not public_path.exists():
@@ -333,17 +341,18 @@ class ConfigServiceClient:
         """
         用户注册。
 
-        支持两种方式：
-        1) 用户成对提供RSA私钥和公钥（会校验格式并校验两者是否匹配）
-        2) 用户不提供时，客户端自动生成RSA密钥对
+        支持三种方式：
+        1) 用户不提供密钥：客户端自动生成RSA密钥对
+        2) 仅提供RSA私钥：客户端由私钥推导公钥并完成注册
+        3) 成对提供RSA私钥和公钥：校验PEM格式并校验两者是否匹配
 
         注册时会将该用户密钥写入客户端默认目录，供后续上传/下载/更新时使用。
 
         Args:
             username: 用户名
             password: 密码（至少6个字符）
-            user_private_key_path: 用户自备RSA私钥文件路径（PEM，可选；若提供则公钥也必须提供）
-            user_public_key_path: 用户自备RSA公钥文件路径（PEM，可选；若提供则私钥也必须提供）
+            user_private_key_path: 用户自备RSA私钥文件路径（PEM，可选）
+            user_public_key_path: 用户自备RSA公钥文件路径（PEM，可选；省略时由私钥推导）
 
         Returns:
             注册结果，包含user_id
@@ -599,16 +608,22 @@ class ConfigServiceClient:
 
     # ============ 配置管理方法 ============
 
-    def upload_config(self, config_name: str, file_path: Union[str, Path],
-                      need_decrypt_response: bool = True) -> Dict[str, Any]:
+    def upload_config(
+            self,
+            config_name_or_path: Union[str, Path],
+            file_path: Optional[Union[str, Path]] = None,
+            need_decrypt_response: bool = True,
+    ) -> Dict[str, Any]:
         """
         上传配置文件。
 
         文件会先在本地使用AES加密，然后上传到服务端。
 
         Args:
-            config_name: 配置名称（将保存到服务端的名称）
-            file_path: 本地配置文件路径
+            config_name_or_path: 若传入 ``file_path``，则表示服务端上的 ``config_name``；
+                若省略 ``file_path``，则将此参数视为本地配置文件路径，``config_name`` 自动取
+                ``Path(config_name_or_path).name``（与源文件名一致）。
+            file_path: 本地配置文件路径；为 ``None`` 时表示仅提供本地路径的单参数写法。
             need_decrypt_response: 是否需要解密服务端返回的数据（用于验证）
 
         Returns:
@@ -620,15 +635,21 @@ class ConfigServiceClient:
         if not self.is_authenticated():
             raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
 
-        file_path = Path(file_path)
-        if not file_path.exists():
-            raise ConfigServiceRuntimeError(f"File not found: {file_path.resolve().absolute()}")
+        if file_path is None:
+            resolved_path = Path(config_name_or_path)
+            config_name = resolved_path.name
+        else:
+            config_name = str(config_name_or_path)
+            resolved_path = Path(file_path)
 
-        self.logger.info(f"Uploading config: {config_name} from {file_path}")
+        if not resolved_path.exists():
+            raise ConfigServiceRuntimeError(f"File not found: {resolved_path.resolve().absolute()}")
+
+        self.logger.info(f"Uploading config: {config_name} from {resolved_path}")
 
         # 读取并加密文件内容
         try:
-            data = file_path.read_bytes()
+            data = resolved_path.read_bytes()
             encrypted_content, encrypted_aes_key = self._encrypt_config_data(data)
         except CryptoError as e:
             raise ConfigServiceRuntimeError(f"Encryption failed: {e}")
@@ -661,26 +682,60 @@ class ConfigServiceClient:
         except APIError as e:
             raise ConfigServiceRuntimeError(f"Failed to list configs: {e}")
 
-    def get_config(self, config_name: str, save_path: Optional[Union[str, Path]] = None,
-                   load_to_env: Literal['set_temp_env', 'write_local_file', 'all', 'none'] = 'none',
-                   need_decrypt: bool = True) -> Optional[bytes]:
+    @staticmethod
+    def _resolve_get_config_file_target(
+            config_name: str,
+            save_path: Optional[Union[str, Path]],
+            save_dir: Optional[Union[str, Path]],
+            load_to_env: Literal['set_temp_env', 'write_local_file', 'all', 'none'],
+    ) -> Optional[Path]:
+        """
+        解析「写文件」目标路径。``set_temp_env`` 模式不使用磁盘落盘语义，固定返回 None。
+        """
+        if load_to_env == "set_temp_env":
+            return None
+        if save_path is not None:
+            return Path(save_path)
+        if save_dir is not None:
+            return Path(save_dir) / Path(config_name)
+        return None
+
+    def get_config(
+            self,
+            config_name: str,
+            *,
+            load_to_env: Literal['set_temp_env', 'write_local_file', 'all', 'none'] = 'none',
+            save_path: Optional[Union[str, Path]] = None,
+            save_dir: Optional[Union[str, Path]] = None,
+            temp_env_loader: Optional[TempEnvLoader] = None,
+            need_decrypt: bool = True,
+    ) -> Optional[bytes]:
         """
         获取并下载配置文件。
 
         自动解密服务端返回的加密数据，可选择保存到文件或加载到环境变量。
 
         Args:
-            config_name: 配置名称
-            save_path: 保存路径，若为None则根据config_name生成
-            load_to_env: 是否加载到环境变量或文件：
-                - 'set_temp_env': 解析并设置到环境变量
-                - 'write_local_file': 写入本地文件（前缀received_）
-                - 'all': 同时设置环境变量和写入文件
-                - 'none': 不做任何处理，只返回解密后的数据
-            need_decrypt: 是否解密数据（若为False则返回加密数据）
+            config_name: 配置名称（服务端上的逻辑名，通常含扩展名）
+            load_to_env: 应用解密结果的方式（位于 ``save_path`` 之前，语义优先）：
+                - ``set_temp_env``: 仅解析并写入当前进程环境变量，**不使用** ``save_path`` /
+                  ``save_dir``（避免与「仅下环境」语义混淆）
+                - ``write_local_file``: 仅写入本地文件
+                - ``all``: 先写入环境变量，再写入文件（文件路径见 ``save_path`` / ``save_dir``）
+                - ``none``: 不写环境变量；若提供了 ``save_path`` 或 ``save_dir`` 则写入对应文件
+            save_path: 本地保存文件的完整路径；优先级高于 ``save_dir``
+            save_dir: 保存目录；与 ``config_name`` 组合为 ``Path(save_dir) / Path(config_name)``
+                作为保存路径（未指定 ``save_path`` 时）
+            temp_env_loader: 当 ``load_to_env`` 为 ``set_temp_env`` 或 ``all`` 时，若传入则
+                用该可调用对象替代内置的 ``.env`` / ``.toml`` 解析逻辑；签名为
+                ``(decrypted_data: bytes, config_name: str) -> None``。
+            need_decrypt: 是否解密数据（若为 False 则按加密载荷处理）
 
         Returns:
-            解密后的配置数据，未指定save_path且load_to_env为'none'时返回
+            - ``load_to_env='set_temp_env'``：返回解密后的 ``bytes``。
+            - ``load_to_env='none'``：未指定 ``save_path`` 且未指定 ``save_dir`` 时返回解密数据；
+              否则写入文件后返回 ``None``。
+            - ``write_local_file`` / ``all``：写入文件后返回 ``None``。
 
         Raises:
             ConfigServiceRuntimeError: 获取失败
@@ -710,49 +765,62 @@ class ConfigServiceClient:
 
         self.rsp = data
 
-        # 处理解密后的数据
-        normalized_save_path = Path(save_path) if save_path else None
-        return self._load_settings(decrypted_data, config_name, normalized_save_path, load_to_env)
+        file_target = self._resolve_get_config_file_target(config_name, save_path, save_dir, load_to_env)
+        return self._load_settings(
+            decrypted_data,
+            config_name,
+            load_to_env,
+            file_target,
+            temp_env_loader,
+        )
 
-    def _load_settings(self, data: bytes, config_name: str,
-                       save_path: Optional[Path],
-                       model: Literal['set_temp_env', 'write_local_file', 'all', 'none']) -> Optional[bytes]:
+    def _load_settings(
+            self,
+            data: bytes,
+            config_name: str,
+            load_to_env: Literal['set_temp_env', 'write_local_file', 'all', 'none'],
+            file_target: Optional[Path],
+            temp_env_loader: Optional[TempEnvLoader],
+    ) -> Optional[bytes]:
         """
-        根据指定模式应用配置数据
-
-        Args:
-            data: 解密后的配置数据
-            config_name: 配置名称
-            save_path: 保存路径
-            model: 应用模式
-
-        Returns:
-            若model为'none'且指定了save_path，返回None；否则返回解密后的数据
+        根据指定模式应用解密后的配置数据。
         """
-        suffix = Path(config_name).suffix.lower()
 
-        if model == 'none':
-            if save_path:
-                target_path = Path(save_path)
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                target_path.write_bytes(data)
-                self.logger.info(f"Saved to: {target_path}")
-            return None if save_path else data
+        def _apply_env() -> None:
+            if temp_env_loader is not None:
+                temp_env_loader(data, config_name)
+            else:
+                suffix = Path(config_name).suffix.lower()
+                self._set_temp_env(data, suffix)
 
-        # 设置环境变量
-        if model in ('set_temp_env', 'all'):
-            self._set_temp_env(data, suffix)
+        if load_to_env == "none":
+            if file_target is not None:
+                file_target.parent.mkdir(parents=True, exist_ok=True)
+                file_target.write_bytes(data)
+                self.logger.info(f"Saved to: {file_target}")
+                return None
+            return data
 
-        # 写入文件
-        if model in ('write_local_file', 'all'):
-            if save_path is None:
-                save_path = Path(f"received_{config_name}")
-            target_path = Path(save_path)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_bytes(data)
-            self.logger.info(f"Saved to: {target_path}")
+        if load_to_env == "set_temp_env":
+            _apply_env()
+            return data
 
-        return None if save_path else data
+        if load_to_env == "write_local_file":
+            out_path = file_target if file_target is not None else Path(f"received_{config_name}")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(data)
+            self.logger.info(f"Saved to: {out_path}")
+            return None
+
+        if load_to_env == "all":
+            _apply_env()
+            out_path = file_target if file_target is not None else Path(f"received_{config_name}")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(data)
+            self.logger.info(f"Saved to: {out_path}")
+            return None
+
+        raise ConfigServiceRuntimeError(f"Unknown load_to_env mode: {load_to_env}")
 
     def _set_temp_env(self, data: bytes, suffix: str) -> None:
         """设置环境变量"""
@@ -773,13 +841,19 @@ class ConfigServiceClient:
         except Exception as e:
             self.logger.warning(f"Failed to set env vars: {e}")
 
-    def update_config(self, config_name: str, file_path: Union[str, Path]) -> Dict[str, Any]:
+    def update_config(
+            self,
+            config_name_or_path: Union[str, Path],
+            file_path: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
         """
         更新配置文件。
 
         Args:
-            config_name: 配置名称
-            file_path: 本地配置文件路径
+            config_name_or_path: 若传入 ``file_path``，则表示服务端上的 ``config_name``；
+                若省略 ``file_path``，则将此参数视为本地配置文件路径，``config_name`` 自动取
+                ``Path(config_name_or_path).name``。
+            file_path: 本地配置文件路径；为 ``None`` 时表示仅提供本地路径的单参数写法。
 
         Returns:
             更新结果
@@ -790,15 +864,21 @@ class ConfigServiceClient:
         if not self.is_authenticated():
             raise ConfigServiceRuntimeError("Not authenticated. Please login first.")
 
-        file_path = Path(file_path)
-        if not file_path.exists():
-            raise ConfigServiceRuntimeError(f"File not found: {file_path.resolve().absolute()}")
+        if file_path is None:
+            resolved_path = Path(config_name_or_path)
+            config_name = resolved_path.name
+        else:
+            config_name = str(config_name_or_path)
+            resolved_path = Path(file_path)
+
+        if not resolved_path.exists():
+            raise ConfigServiceRuntimeError(f"File not found: {resolved_path.resolve().absolute()}")
 
         self.logger.info(f"Updating config: {config_name}")
 
         # 读取并加密
         try:
-            data = file_path.read_bytes()
+            data = resolved_path.read_bytes()
             encrypted_content, encrypted_aes_key = self._encrypt_config_data(data)
         except CryptoError as e:
             raise ConfigServiceRuntimeError(f"Encryption failed: {e}")
@@ -891,5 +971,6 @@ __all__ = [
     'ConfigServiceInitError',
     'ConfigServiceRuntimeError',
     'ConfigServiceResponseCodeError',
+    'TempEnvLoader',
     '_verify_env_settings'
 ]
