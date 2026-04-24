@@ -1,0 +1,53 @@
+name: Create Git Tag from PR Description
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]          # 可根据你的主分支名称调整（main / master）
+
+permissions:
+  contents: write             # 必须，用于创建 tag
+
+jobs:
+  tag_on_merge:
+    if: github.event.pull_request.merged == true   # 仅当 PR 被合并时运行
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # 获取完整历史（非必须，但有助于后续操作）
+
+      - name: Create tag via GitHub API
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 1. 获取 PR 描述正文
+            const body = context.payload.pull_request.body || '';
+            
+            // 2. 用正则匹配 "Tag <标签名>" 或 "Tags <标签名>"（支持大小写和冒号格式）
+            const match = body.match(/Tag\s+([\w\.\-]+)/i) || body.match(/Tags?:\s*([\w\.\-]+)/i);
+            
+            if (!match) {
+              console.log('未在 PR 描述中找到有效的标签声明（如 "Tag v1.0.0"），跳过创建标签。');
+              return;
+            }
+            
+            const tagName = match[1];
+            console.log(`准备创建标签: ${tagName}`);
+            
+            // 3. 获取合并提交的 SHA（PR 合并后产生的 merge commit）
+            const mergeCommitSha = context.payload.pull_request.merge_commit_sha;
+            if (!mergeCommitSha) {
+              throw new Error('无法获取 merge commit SHA，请确认 PR 已被合并。');
+            }
+            
+            // 4. 调用 GitHub API 创建轻量标签（lightweight tag）
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/${tagName}`,
+              sha: mergeCommitSha
+            });
+            
+            console.log(`✅ 标签 ${tagName} 已成功创建在提交 ${mergeCommitSha} 上。`);
