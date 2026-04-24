@@ -1,10 +1,10 @@
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]         # 1. 添加插件
 build-backend = "hatchling.build"
 [project]
 name = "tkzs-config-service-client"
-version = "0.4.0"
+dynamic = ["version"]   # 2. 动态版本好
 description = "tkzs config service client,get config or env from Configuration Center"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -21,6 +21,14 @@ src = "src"  # 必须放这里！
 [tool.hatch.build.targets.wheel]
 packages = ["src/tkzs_config_service_client"]
 
+[tool.hatch.version] # 设置版本号来源
+source = "vcs"    
+[tool.hatch.version.raw-options]
+#version_scheme = "no-guess-dev"               # 在非 release 标签时，不增加开发版本号
+local_scheme = "no-local-version"    
+
+[tool.hatch.build.hooks.vcs] 
+version-file = "_version.py"
 
 exclude = [
   "service/",

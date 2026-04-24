@@ -7,7 +7,18 @@
 
 ---
 
-## 新版本 v0.4.0 更新
+## 新版本 v0.5.0 更新
+
+### ⚠️ 不兼容性更新 (Breaking Changes)
+
+本次更新对以下 API 进行了不兼容性修改：
+
+| 方法 | 变更 |
+|------|------|
+| `upload_config()` | 形参顺序调整：`file_path` 移至第一位，`config_name` 移至第二位 |
+| `update_config()` | 形参顺序调整：`file_path` 移至第一位，`config_name` 移至第二位 |
+| `get_config()` | 形参顺序调整：`save_dir` 移至 `save_path` 之前 |
+| `temp_env_loader` | 用户回调抛出的异常现在会传播出去（之前仅记录日志） |
 
 ### 主要特性
 - ✅ **用户注册/登录**：支持用户名密码注册，JWT Token认证
@@ -80,7 +91,14 @@ client = ConfigServiceClient(
 # 方式1：不提供密钥，客户端自动生成RSA密钥对
 client.register("my_username", "my_password")
 
-# 方式2：使用自备RSA公私钥（必须成对提供；会校验格式和匹配关系）
+# 方式2：仅提供自备RSA私钥（公钥由私钥推导）
+client.register(
+    "my_username",
+    "my_password",
+    user_private_key_path="D:/secure_keys/my_username_private.pem",
+)
+
+# 方式3：使用自备RSA公私钥（会校验格式和匹配关系）
 client.register(
     "my_username",
     "my_password",
@@ -91,8 +109,9 @@ client.register(
 # 登录（支持本次登录显式指定私钥路径，优先级最高）
 client.login("my_username", "my_password", private_key_path="D:/secure_keys/my_private.pem")
 
-# 上传配置
-client.upload_config("mysql.env", "/path/to/mysql.env")
+# 上传配置（两种写法）
+client.upload_config("/path/to/mysql.env")  # config_name 自动取 mysql.env
+client.upload_config("/path/to/mysql.env", config_name="mysql.env")
 
 # 查看配置列表
 configs = client.list_configs()
@@ -100,13 +119,22 @@ for cfg in configs:
     print(f"- {cfg['config_name']} (更新于 {cfg['updated_at']})")
 
 # 下载配置到文件（会自动创建目录）
-client.get_config("mysql.env", save_path="./tmp/mysql.env")
+client.get_config("mysql.env", load_to_env="none", save_dir="./tmp")  # 保存为 ./tmp/mysql.env
+client.get_config("mysql.env", load_to_env="none", save_path="./tmp/mysql.env")  # 完整路径
 
 # 下载并加载到环境变量
 client.get_config("app.toml", load_to_env="set_temp_env")
 
-# 更新配置
-client.update_config("mysql.env", "/path/to/new_mysql.env")
+# 下载并自定义写环境变量逻辑（例如支持 yaml/json）
+def my_temp_env_loader(data: bytes, config_name: str) -> None:
+    # 用户自定义解析逻辑
+    pass
+
+client.get_config("app.yaml", load_to_env="set_temp_env", temp_env_loader=my_temp_env_loader)
+
+# 更新配置（两种写法）
+client.update_config("/path/to/new_mysql.env")
+client.update_config("/path/to/new_mysql.env", config_name="mysql.env")
 
 # 删除配置
 client.delete_config("old_config.env")
@@ -123,6 +151,7 @@ client.logout()
 - 基础流程示例：`case/simple_case.py`
 - 注销重注册示例：`case/deactivate_re_register_case.py`
 - 私钥优先级示例：`case/private_key_priority_case.py`
+- API 易用性示例：`case/client_api_ergonomics_case.py`
 
 运行示例：
 
@@ -132,15 +161,26 @@ uv run python ./case/private_key_priority_case.py
 
 ### 登录私钥路径优先级
 
-客户端登录前会先解析私钥，并据此确定本次登录上送服务端的公钥；私钥路径优先级如下：
+客户端登录前会先解析私钥，并据此确定本次登录上送服务端的公钥。私钥路径遵循以下优先级（从高到低）：
 
-1. `client.login(...)` 登录参数层（最高优先级）  
+1. `client.login(...)` 登录参数层（最高优先级）
    - 同层规则：`private_key_path` > `private_key_dir`
-2. `configure_client(...)` 全局配置层  
+2. **类属性层（构造函数参数）**
+   - 即 `ConfigServiceClient(private_key_path=...)` 设置的值
+   - 优先级高于 `configure_client(...)` 全局配置
+3. `configure_client(...)` 全局配置层
    - 同层规则：`private_key_path` > `private_key_dir`
-3. 默认逻辑：`~/.ssl/{username}_private_key.pem`
+4. 默认逻辑：`~/.ssl/{username}_private_key.pem`（最低）
 
-`private_key_dir` 仅表示私钥文件父目录，文件名会按规则自动拼接：  
+**优先级链示例**：
+```python
+configure_client(private_key_path="/path/to/global.pem")  # 第3层
+client = ConfigServiceClient(private_key_path="/path/to/class.pem")  # 第2层
+client.login("user", "pass", private_key_path="/path/to/login.pem")  # 第1层
+# 结果：使用 login.pem
+```
+
+`private_key_dir` 仅表示私钥文件父目录，文件名会按规则自动拼接：
 `{normalized_username}{private_key_suffix}`，默认后缀为 `_private_key.pem`。
 
 登录时公钥处理规则：
@@ -291,7 +331,8 @@ CREATE TABLE configs (
   - `~/.ssl/{username}_private_key.pem`
   - `~/.ssl/{username}_public_key.pem`
 - 若注册时未提供RSA文件，客户端会自动生成并提示私钥保存位置，请务必离线备份。
-- 若注册时提供自备RSA文件，必须同时提供公钥和私钥，客户端会校验PEM格式并校验公私钥是否匹配。
+- 若注册时仅提供私钥，客户端会自动推导公钥并完成注册。
+- 若注册时同时提供公私钥，客户端会校验PEM格式并校验公私钥是否匹配。
 - 登录时若检测到该用户密钥文件，会自动切换到该用户密钥进行解密与登录校验。
 - 若仅有账号密码但私钥缺失，登录会被拒绝（无法构造/验证登录公钥）。
 - 若私钥与该用户公钥不匹配，登录会被拒绝。
@@ -370,7 +411,16 @@ tkzs_config_service/
 
 ## 版本历史
 
-### v0.4.0 (2026)
+### v0.5.1 (2026)
+
+**配置优先级优化**：
+
+- 修复登录私钥路径优先级逻辑，添加类属性检查层
+- **新优先级链**：`login参数 > 类属性 > configure_client全局配置 > 默认值`
+- 修复 `__init__` 中密钥路径初始化逻辑，正确处理全局配置的优先级
+- 新增完整优先级链测试用例
+
+### v0.5.0 (2026)
 - 登录增强为账号/密码/公钥三要素校验
 - 客户端登录时支持"公钥缺失则由私钥推导并落盘"
 - 完善 `private_key_path/private_key_dir` 的同层与跨层优先级
