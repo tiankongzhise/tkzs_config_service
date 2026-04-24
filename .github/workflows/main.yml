@@ -1,0 +1,17 @@
+name: Tag on PR Merge
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  tag:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create Tag
+        uses: david-lor/action-tag-on-pr-merge@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          push-tag: 'true'
